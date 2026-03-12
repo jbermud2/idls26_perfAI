@@ -67,10 +67,8 @@ def init_wandb(args) -> Optional["wandb.sdk.wandb_run.Run"]:
 
     if args.wandb_mode == "online" and not api_key and args.wandb_anonymous == "never":
         print(
-            "W&B online mode requested but no API key and anonymous=never. "
-            "Either provide an API key, enable anonymous mode, or disable W&B."
+            "No WANDB_API_KEY found in env/args. Will try existing local wandb login credentials."
         )
-        return None
 
     try:
         if api_key:
@@ -82,8 +80,7 @@ def init_wandb(args) -> Optional["wandb.sdk.wandb_run.Run"]:
             )
     except Exception as exc:
         print(f"W&B login failed: {exc}")
-        if args.wandb_mode == "online":
-            return None
+        print("Proceeding to wandb.init anyway in case local auth already exists.")
 
     run_config = vars(args).copy()
     run_config.pop("wandb_api_key", None)
@@ -642,7 +639,7 @@ def main() -> None:
     parser.add_argument(
         "--data-root",
         type=str,
-        default="/ocean/projects/cis260045p/shared/data/MNIST",
+        default="/ocean/projects/cis260045p/shared/data",
         help="Root directory for MNIST data (PSC default or local path).",
     )
     
