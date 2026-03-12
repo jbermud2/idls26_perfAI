@@ -72,6 +72,14 @@ def init_wandb(args):
 
     api_key = os.environ.get('WANDB_API_KEY', '') or args.wandb_api_key
 
+    if args.wandb_mode == 'online' and not api_key and args.wandb_anonymous == 'never':
+        print(
+            'W&B online mode needs authentication but no API key was provided. '
+            'Set WANDB_API_KEY, pass --wandb-api-key, run "wandb login", or use --wandb-anonymous allow/must.'
+        )
+        print('Skipping W&B init to avoid interactive login prompt.')
+        return None
+
     if args.wandb_mode == 'offline':
         print('W&B running in offline mode. Use wandb sync later to upload the run.')
 
@@ -82,30 +90,47 @@ def init_wandb(args):
             print('W&B has no API key from --wandb-api-key or WANDB_API_KEY. Online runs may fail unless this machine is already logged in.')
     except Exception as exc:
         print('W&B login failed: {}'.format(exc))
-        if args.wandb_mode == 'online':
-            return None
+        print('Proceeding to wandb.init anyway; existing local auth may still work.')
 
     run_config = vars(args).copy()
     run_config.pop('wandb_api_key', None)
 
+    init_kwargs = {
+        'project': args.wandb_project,
+        'entity': args.wandb_entity if args.wandb_entity else None,
+        'name': args.wandb_run_name if args.wandb_run_name else None,
+        'mode': args.wandb_mode,
+        'anonymous': args.wandb_anonymous,
+        'id': args.wandb_run_id if args.wandb_run_id else None,
+        'resume': args.wandb_resume if args.wandb_run_id else None,
+        'config': run_config,
+    }
+
     try:
-        run = wandb.init(
-            project=args.wandb_project,
-            entity=args.wandb_entity if args.wandb_entity else None,
-            name=args.wandb_run_name if args.wandb_run_name else None,
-            mode=args.wandb_mode,
-            config=run_config,
-        )
-        print('W&B initialized: project={}, entity={}, mode={}, run_name={}'.format(
-            args.wandb_project,
-            args.wandb_entity if args.wandb_entity else '<default>',
-            args.wandb_mode,
-            args.wandb_run_name if args.wandb_run_name else '<auto>',
-        ))
-        return run
+        run = wandb.init(**init_kwargs)
     except Exception as exc:
-        print('W&B init failed: {}'.format(exc))
-        return None
+        print('W&B init failed with entity={}: {}'.format(
+            args.wandb_entity if args.wandb_entity else '<default>', exc
+        ))
+        if init_kwargs.get('entity') is not None:
+            print('Retrying W&B init without explicit entity (using account default).')
+            init_kwargs['entity'] = None
+            try:
+                run = wandb.init(**init_kwargs)
+            except Exception as retry_exc:
+                print('W&B init retry failed: {}'.format(retry_exc))
+                return None
+        else:
+            return None
+
+    print('W&B initialized: project={}, entity={}, mode={}, run_name={}'.format(
+        args.wandb_project,
+        run.entity if getattr(run, 'entity', None) else '<default>',
+        args.wandb_mode,
+        args.wandb_run_name if args.wandb_run_name else '<auto>',
+    ))
+    print('W&B run id: {}'.format(run.id))
+    return run
 
 
 def log_to_wandb(run, metrics, step=None):
@@ -124,6 +149,62 @@ def finish_wandb(run):
         run.finish()
     except Exception as exc:
         print('W&B finish failed: {}'.format(exc))
+
+
+def save_training_checkpoint(checkpoint_path, model, optimizer, scheduler, epoch, running_stats,
+                             best_validation_accuracy, best_validation_snapshot,
+                             seconds_per_training_cycle, run=None):
+    checkpoint = {
+        'epoch': int(epoch),
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'scheduler_state_dict': scheduler.state_dict() if scheduler is not None else None,
+        'running_stats': dict(running_stats),
+        'best_validation_accuracy': float(best_validation_accuracy),
+        'best_validation_snapshot': dict(best_validation_snapshot),
+        'seconds_per_training_cycle': float(seconds_per_training_cycle),
+    }
+
+    torch.save(checkpoint, checkpoint_path)
+
+    if run is not None:
+        try:
+            checkpoint_dir = os.path.dirname(os.path.abspath(checkpoint_path)) or '.'
+            checkpoint_name = os.path.basename(checkpoint_path)
+            run.save(checkpoint_name, base_path=checkpoint_dir, policy='now')
+        except Exception as exc:
+            print('W&B checkpoint upload failed: {}'.format(exc))
+
+
+def load_training_checkpoint(checkpoint_path, device, run=None):
+    resolved_path = checkpoint_path
+
+    if not os.path.exists(resolved_path) and run is not None and wandb is not None:
+        try:
+            restored = wandb.restore(
+                os.path.basename(checkpoint_path),
+                run_path='{}/{}/{}'.format(run.entity, run.project, run.id),
+                root=os.path.dirname(os.path.abspath(checkpoint_path)) or '.',
+                replace=True,
+            )
+            if restored is not None and os.path.exists(restored.name):
+                resolved_path = restored.name
+        except Exception as exc:
+            print('W&B checkpoint restore failed: {}'.format(exc))
+
+    if not os.path.exists(resolved_path):
+        return None
+
+    try:
+        checkpoint = torch.load(resolved_path, map_location=device)
+        print('Loaded checkpoint from {} (epoch {}).'.format(
+            resolved_path,
+            checkpoint.get('epoch', 'unknown')
+        ))
+        return checkpoint
+    except Exception as exc:
+        print('Checkpoint load failed: {}'.format(exc))
+        return None
 
 
 def compute_multiclass_auc(targets, probabilities):
@@ -504,14 +585,24 @@ def main():
                         help='enable Weights & Biases logging')
     parser.add_argument('--wandb-project', type=str, default='MNIST_PERF',
                         help='W&B project name')
-    parser.add_argument('--wandb-entity', type=str, default='PerforatedAI_IDL',
+    parser.add_argument('--wandb-entity', type=str, default='',
                         help='W&B entity (team) name (optional)')
     parser.add_argument('--wandb-run-name', type=str, default='',
                         help='W&B run name (optional)')
     parser.add_argument('--wandb-mode', type=str, default='online', choices=['online', 'offline', 'disabled'],
                         help='W&B mode')
-    parser.add_argument('--wandb-api-key', type=str, default='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',
-                        help='enter api key or set WANDB_API_KEY in the environment')
+    parser.add_argument('--wandb-anonymous', type=str, default='never', choices=['never', 'allow', 'must'],
+                        help='W&B anonymous mode for non-interactive login behavior')
+    parser.add_argument('--wandb-run-id', type=str, default='',
+                        help='W&B run id used for resuming an existing run')
+    parser.add_argument('--wandb-resume', type=str, default='allow', choices=['allow', 'must', 'never'],
+                        help='W&B resume behavior when --wandb-run-id is provided')
+    parser.add_argument('--wandb-api-key', type=str, default='',
+                        help='optional API key; preferred: set WANDB_API_KEY in the environment')
+    parser.add_argument('--checkpoint-path', type=str, default='wandb_last_checkpoint.pt',
+                        help='path to last-epoch checkpoint file')
+    parser.add_argument('--resume-from-checkpoint', action='store_true', default=False,
+                        help='resume model/optimizer/scheduler and epoch from --checkpoint-path')
     args = parser.parse_args()
     use_cuda = not args.no_cuda and torch.cuda.is_available()
     use_mps = not args.no_mps and torch.backends.mps.is_available()
@@ -576,13 +667,36 @@ def main():
 
     run = init_wandb(args)
     cycle_start = time.perf_counter()
+    start_epoch = 1
     running_stats = {}
     best_validation_accuracy = float('-inf')
     best_validation_snapshot = {}
 
+    if args.resume_from_checkpoint:
+        checkpoint = load_training_checkpoint(args.checkpoint_path, device, run=run)
+        if checkpoint is not None:
+            try:
+                model.load_state_dict(checkpoint['model_state_dict'])
+                optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                scheduler_state = checkpoint.get('scheduler_state_dict')
+                if scheduler is not None and scheduler_state is not None:
+                    scheduler.load_state_dict(scheduler_state)
+
+                running_stats = checkpoint.get('running_stats', {})
+                best_validation_accuracy = checkpoint.get('best_validation_accuracy', float('-inf'))
+                best_validation_snapshot = checkpoint.get('best_validation_snapshot', {})
+                last_epoch = int(checkpoint.get('epoch', 0))
+                start_epoch = last_epoch + 1
+                previous_cycle_time = float(checkpoint.get('seconds_per_training_cycle', 0.0))
+                cycle_start = time.perf_counter() - previous_cycle_time
+                print('Resuming training from epoch {}.'.format(start_epoch))
+            except KeyError as exc:
+                print('Checkpoint is missing required key {}. Starting from scratch.'.format(exc))
+                start_epoch = 1
+
 
     #Run your epochs of training and testing
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(start_epoch, args.epochs + 1):
         epoch_start = time.perf_counter()
 
         train_accuracy = train(args, model, device, train_loader, optimizer, epoch)
@@ -638,6 +752,19 @@ def main():
         print('Epoch {} metrics: {}'.format(epoch, epoch_log))
         if run is not None:
             log_to_wandb(run, epoch_log, step=epoch)
+
+        save_training_checkpoint(
+            checkpoint_path=args.checkpoint_path,
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            epoch=epoch,
+            running_stats=running_stats,
+            best_validation_accuracy=best_validation_accuracy,
+            best_validation_snapshot=best_validation_snapshot,
+            seconds_per_training_cycle=seconds_per_training_cycle,
+            run=run,
+        )
 
         if(training_complete):
             break
