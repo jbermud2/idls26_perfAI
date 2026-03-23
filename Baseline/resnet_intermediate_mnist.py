@@ -548,7 +548,7 @@ def train(
         pred = output.argmax(dim=1, keepdim=True)
         correct += pred.eq(target.view_as(pred)).sum()
 
-    train_accuracy = 100.0 * correct.item() / len(train_loader.dataset)
+    train_accuracy = 100.0 * correct / len(train_loader.dataset)
     return train_accuracy
 
 
