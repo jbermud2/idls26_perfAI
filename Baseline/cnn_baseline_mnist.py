@@ -538,36 +538,49 @@ def evaluate(
     model.to(device)
     avg_loss = 0.0
     correct = 0
+
+    top5_correct = 0
+    total_samples = 0
+
     all_targets = []
     all_probs = []
 
     with torch.no_grad():
         for data, target in data_loader:
             data, target = data.to(device), target.to(device)
+
             output = model(data)
             probs = torch.exp(output)
 
             avg_loss += F.nll_loss(output, target, reduction="sum").item()
+
+            # Top-1 accuracy
             pred = output.argmax(dim=1, keepdim=True)
             correct += pred.eq(target.view_as(pred)).sum()
+
+            # Top-5 accuracy
+            _, pred_top5 = output.topk(5, dim=1)
+            top5_correct += pred_top5.eq(target.view(-1, 1)).sum().item()
+            total_samples += data.size(0)
 
             all_targets.append(target.detach().cpu())
             all_probs.append(probs.detach().cpu())
 
     avg_loss /= len(data_loader.dataset)
     accuracy = 100.0 * correct.item() / len(data_loader.dataset)
+    top5_accuracy = 100.0 * top5_correct / total_samples
+
     all_targets = torch.cat(all_targets)
     all_probs = torch.cat(all_probs)
     auc = compute_multiclass_auc(all_targets, all_probs)
-    precision_at_1 = accuracy
 
-    metrics = {
+    return {
         "loss": avg_loss,
         "accuracy": accuracy,
         "auc": auc,
-        "precision_at_1": precision_at_1,
+        "precision_at_1": accuracy,
+        "top5_accuracy": top5_accuracy, 
     }
-    return metrics
 
 
 def test(
@@ -909,6 +922,7 @@ def main() -> None:
             best_validation_snapshot = {
                 "test_accuracy_at_best_validation": test_metrics["accuracy"],
                 "test_auc_at_best_validation": test_metrics["auc"],
+                "test_top5_at_best_validation": test_metrics["top5_accuracy"],  # ✅ NEW
                 "validation_accuracy_best": validation_accuracy,
                 "validation_auc_at_best_validation": validation_auc,
                 "epoch_at_best_validation": epoch,
@@ -932,6 +946,8 @@ def main() -> None:
             "perforatedai/precision_at_1": test_metrics["precision_at_1"],
             "perforatedai/seconds_per_training_epoch": seconds_per_training_epoch,
             "perforatedai/seconds_per_training_cycle": seconds_per_training_cycle,
+            "perforatedai/validation_top5_accuracy": val_metrics["top5_accuracy"],
+            "perforatedai/test_top5_accuracy": test_metrics["top5_accuracy"],
         }
 
         if best_validation_snapshot:
@@ -944,6 +960,7 @@ def main() -> None:
             epoch_log["perforatedai/epoch_at_best_validation"] = best_validation_snapshot[
                 "epoch_at_best_validation"
             ]
+            final_metrics["perforatedai/test_top5_at_best_validation"] =  best_validation_snapshot["test_top5_at_best_validation"]
 
         print(f"Epoch {epoch} metrics: {epoch_log}")
         if run is not None:
@@ -987,7 +1004,7 @@ def main() -> None:
     }
 
     if best_validation_snapshot and safe_number(latency_ms) is not None:
-        final_metrics["efficientnet/accuracy_vs_flops"] = best_validation_snapshot[
+        final_metrics["efficientnet/accuracy_vs_latency"] = best_validation_snapshot[
             "test_accuracy_at_best_validation"
         ]
         final_metrics["perforatedai/test_auc_at_best_validation"] = safe_number(
