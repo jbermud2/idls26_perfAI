@@ -28,7 +28,7 @@ IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 
 # Default widened stage channels (intermediate between standard ResNet-18 and deeper models)
-DEFAULT_WIDE_CHANNELS: Tuple[int, int, int, int] = (80, 160, 320, 640)
+DEFAULT_WIDE_CHANNELS: Tuple[int, int, int, int] = (76, 152, 304, 608)
 
 
 class BasicBlock(nn.Module):
@@ -808,7 +808,7 @@ def main() -> None:
     )
 
     print(f"Model stage widths (c1..c4): {DEFAULT_WIDE_CHANNELS}")
-    model = resnet18_widened_imagenet(channels=(80, 160, 320, 640))
+    model = resnet18_widened_imagenet(channels=(76, 152, 304, 608))
     total_params, trainable_params = count_parameters(model)
     print(f"Total parameters: {total_params:,}")
     print(f"Trainable parameters: {trainable_params:,}")
