@@ -206,6 +206,14 @@ def load_training_checkpoint(checkpoint_path, device, run=None):
         print('Checkpoint load failed: {}'.format(exc))
         return None
 
+def compute_topk_accuracy(output, target, k=5):
+    with torch.no_grad():
+        _, pred = output.topk(k, dim=1, largest=True, sorted=True)
+        pred = pred.t()
+        correct = pred.eq(target.view(1, -1).expand_as(pred))
+        correct_k = correct[:k].reshape(-1).float().sum(0, keepdim=True)
+        return (correct_k.item() * 100.0) / target.size(0)
+
 
 def compute_multiclass_auc(targets, probabilities):
     global _AUC_WARNING_EMITTED
@@ -481,39 +489,46 @@ def evaluate(model, device, data_loader):
     model.eval()
     avg_loss = 0
     correct = 0
+    top5_correct = 0
+    total_samples = 0
+
     all_targets = []
     all_probs = []
-    #Dont calculate Gradients
+
     with torch.no_grad():
-        #Loop over all the test data
         for data, target in data_loader:
             data, target = data.to(device), target.to(device)
-            #Pass the data through your model to get the output
+
             output = model(data)
             probs = torch.exp(output)
-            #Calculate the error
-            avg_loss += F.nll_loss(output, target, reduction='sum').item()  # sum up batch loss
-            #Determine the predictions the network was making
-            pred = output.argmax(dim=1, keepdim=True)  # get the index of the max log-probability
-            #Increment how many times it was correct
+
+            avg_loss += F.nll_loss(output, target, reduction='sum').item()
+
+            pred = output.argmax(dim=1, keepdim=True)
             correct += pred.eq(target.view_as(pred)).sum()
+
+            # Top-5 accuracy accumulation
+            _, pred_top5 = output.topk(5, dim=1)
+            top5_correct += pred_top5.eq(target.view(-1, 1)).sum().item()
+            total_samples += data.size(0)
+
             all_targets.append(target.detach().cpu())
             all_probs.append(probs.detach().cpu())
 
-    #Display Metrics
     avg_loss /= len(data_loader.dataset)
     accuracy = 100. * correct.item() / len(data_loader.dataset)
+    top5_accuracy = 100.0 * top5_correct / total_samples
+
     all_targets = torch.cat(all_targets)
     all_probs = torch.cat(all_probs)
     auc = compute_multiclass_auc(all_targets, all_probs)
-    #For single-label classification, Precision@1 equals top-1 accuracy.
-    precision_at_1 = accuracy
 
     metrics = {
         'loss': avg_loss,
         'accuracy': accuracy,
         'auc': auc,
-        'precision_at_1': precision_at_1,
+        'precision_at_1': accuracy,
+        'top5_accuracy': top5_accuracy,
     }
     return metrics
 
@@ -540,14 +555,17 @@ def test(model, device, val_loader, test_loader, optimizer, scheduler, args):
         optimizer, scheduler = GPA.pai_tracker.setup_optimizer(model, optimArgs, schedArgs)
 
     metrics = {
-        'validation_loss': val_metrics['loss'],
-        'validation_accuracy': val_metrics['accuracy'],
-        'validation_auc': val_metrics['auc'],
-        'validation_precision_at_1': val_metrics['precision_at_1'],
-        'test_loss': test_metrics['loss'],
-        'test_accuracy': test_metrics['accuracy'],
-        'test_auc': test_metrics['auc'],
-        'test_precision_at_1': test_metrics['precision_at_1'],
+    'validation_loss': val_metrics['loss'],
+    'validation_accuracy': val_metrics['accuracy'],
+    'validation_auc': val_metrics['auc'],
+    'validation_precision_at_1': val_metrics['precision_at_1'],
+    'validation_top5_accuracy': val_metrics['top5_accuracy'],
+
+    'test_loss': test_metrics['loss'],
+    'test_accuracy': test_metrics['accuracy'],
+    'test_auc': test_metrics['auc'],
+    'test_precision_at_1': test_metrics['precision_at_1'],
+    'test_top5_accuracy': test_metrics['top5_accuracy'],
     }
     return model, optimizer, scheduler, training_complete, metrics
 
@@ -719,6 +737,7 @@ def main():
             best_validation_snapshot = {
                 'test_accuracy_at_best_validation': eval_metrics['test_accuracy'],
                 'test_auc_at_best_validation': eval_metrics['test_auc'],
+                'test_top5_at_best_validation': eval_metrics['test_top5_accuracy'],  # ✅ added
                 'validation_accuracy_best': validation_accuracy,
                 'validation_auc_at_best_validation': validation_auc,
                 'epoch_at_best_validation': epoch,
@@ -742,6 +761,8 @@ def main():
             'perforatedai/precision_at_1': eval_metrics['test_precision_at_1'],
             'perforatedai/seconds_per_training_epoch': seconds_per_training_epoch,
             'perforatedai/seconds_per_training_cycle': seconds_per_training_cycle,
+            'perforatedai/validation_top5_accuracy': eval_metrics['validation_top5_accuracy'],
+            'perforatedai/test_top5_accuracy': eval_metrics['test_top5_accuracy'],
         }
 
         if best_validation_snapshot:
@@ -795,6 +816,7 @@ def main():
         final_metrics['perforatedai/validation_accuracy_best'] = best_validation_snapshot['validation_accuracy_best']
         final_metrics['perforatedai/validation_auc_at_best_validation'] = safe_number(best_validation_snapshot['validation_auc_at_best_validation'])
         final_metrics['perforatedai/epoch_at_best_validation'] = best_validation_snapshot['epoch_at_best_validation']
+        final_metrics['perforatedai/test_top5_at_best_validation'] = best_validation_snapshot['test_top5_at_best_validation']
 
     print('Final performance metrics: {}'.format(final_metrics))
     if run is not None:
