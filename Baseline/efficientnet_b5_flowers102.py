@@ -678,21 +678,21 @@ def main() -> None:
         help="enable Weights & Biases logging",
     )
     parser.add_argument(
-        "--wandb-project",
-        type=str,
-        default="FLOWERS102_EFFICIENTNET_B5",
-        help="W&B project name",
+    "--wandb-project",
+    type=str,
+    default="MNIST_PERF",
+    help="W&B project name",
     )
     parser.add_argument(
         "--wandb-entity",
         type=str,
-        default="",
-        help="W&B entity (team) name (optional)",
+        default="PerforatedAI_IDL",
+        help="W&B entity (team) name",
     )
     parser.add_argument(
         "--wandb-run-name",
         type=str,
-        default="",
+        default="EfficientNet_B5_Flowers102",
         help="W&B run name (optional)",
     )
     parser.add_argument(
