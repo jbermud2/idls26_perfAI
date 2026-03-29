@@ -1,3 +1,9 @@
+'''
+For running:
+export $WANDB_API_KEY=your_key_here or add --wandb-api-key
+python efficientnet_b5_flowers102.py --data-root ./data --use-wandb 
+'''
+
 from __future__ import annotations
 
 import argparse
@@ -33,7 +39,7 @@ except ImportError:
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 
-FLOWERS_DATASET_ROOT_DEFAULT = "/ocean/projects/cis260045p/shared/data/flowers/dataset"
+FLOWERS_DATASET_ROOT_DEFAULT = "./data"
 NUM_CLASSES = 102
 DEFAULT_CROP_SIZE = 456
 DEFAULT_RESIZE_SIZE = 466
@@ -432,11 +438,12 @@ def train(
     train_loader: torch.utils.data.DataLoader,
     optimizer: optim.Optimizer,
     epoch: int,
-) -> Tuple[float, float]:
+) -> Tuple[float, float, float]:
     """Standard supervised training loop using cross entropy on logits."""
     model.train()
     model.to(device)
     correct = 0
+    correct_top5 = 0
     total_loss = 0.0
     total_seen = 0
 
@@ -469,9 +476,14 @@ def train(
         pred = output.argmax(dim=1, keepdim=True)
         correct += pred.eq(target.view_as(pred)).sum()
 
+        maxk = min(5, output.size(1))
+        _, pred_top5 = output.topk(maxk, dim=1, largest=True, sorted=True)
+        correct_top5 += pred_top5.eq(target.view(-1, 1).expand_as(pred_top5)).sum()
+
     train_accuracy = 100.0 * correct / len(train_loader.dataset)
+    train_top5_accuracy = 100.0 * correct_top5 / len(train_loader.dataset)
     train_loss = total_loss / max(total_seen, 1)
-    return float(train_loss), float(train_accuracy)
+    return float(train_loss), float(train_accuracy), float(train_top5_accuracy)
 
 
 def evaluate(
@@ -519,7 +531,6 @@ def test(
 ) -> Tuple[Dict[str, float], Dict[str, float]]:
     val_metrics = evaluate(model, device, val_loader)
     test_metrics = evaluate(model, device, test_loader)
-
     print(
         "\nValidation set: loss={:.4f}, top-1={:.2f}%, top-5={:.2f}%\n".format(
             val_metrics["loss"],
@@ -534,7 +545,6 @@ def test(
             test_metrics["accuracy_top5"],
         )
     )
-
     return val_metrics, test_metrics
 
 
@@ -646,22 +656,16 @@ def main() -> None:
         help="directory for checkpoints and artifacts",
     )
     parser.add_argument(
-        "--train-dir",
+        "--data-root",
         type=str,
-        default=os.path.join(FLOWERS_DATASET_ROOT_DEFAULT, "train"),
-        help="Flowers-102 training set root",
+        default=FLOWERS_DATASET_ROOT_DEFAULT,
+        help="root directory for torchvision Flowers102 data",
     )
     parser.add_argument(
-        "--val-dir",
-        type=str,
-        default=os.path.join(FLOWERS_DATASET_ROOT_DEFAULT, "valid"),
-        help="Flowers-102 validation set root",
-    )
-    parser.add_argument(
-        "--test-dir",
-        type=str,
-        default=os.path.join(FLOWERS_DATASET_ROOT_DEFAULT, "test"),
-        help="Flowers-102 test set root",
+        "--no-download",
+        action="store_true",
+        default=False,
+        help="disable automatic dataset download if missing",
     )
     parser.add_argument(
         "--num-workers",
@@ -749,11 +753,27 @@ def main() -> None:
 
     train_transform, val_transform, test_transform, crop_size = build_transforms()
 
-    train_dataset = datasets.ImageFolder(args.train_dir, transform=train_transform)
-    val_dataset = datasets.ImageFolder(args.val_dir, transform=val_transform)
-    test_dataset = datasets.ImageFolder(args.test_dir, transform=test_transform)
+    download = not args.no_download
+    train_dataset = datasets.Flowers102(
+        root=args.data_root,
+        split="train",
+        transform=train_transform,
+        download=download,
+    )
+    val_dataset = datasets.Flowers102(
+        root=args.data_root,
+        split="val",
+        transform=val_transform,
+        download=download,
+    )
+    test_dataset = datasets.Flowers102(
+        root=args.data_root,
+        split="test",
+        transform=test_transform,
+        download=download,
+    )
 
-    print(f"Classes in train set: {len(train_dataset.classes)}")
+    print(f"Dataset sizes -> train: {len(train_dataset)}, val: {len(val_dataset)}, test: {len(test_dataset)}")
 
     num_workers = args.num_workers if args.num_workers >= 0 else 0
 
@@ -839,7 +859,7 @@ def main() -> None:
     for epoch in range(start_epoch, args.epochs + 1):
         epoch_start = time.perf_counter()
 
-        train_loss, train_accuracy = train(args, model, device, train_loader, optimizer, epoch)
+        train_loss, train_accuracy, train_top5_accuracy = train(args, model, device, train_loader, optimizer, epoch)
         val_metrics, test_metrics = test(model, device, val_loader, test_loader)
 
         scheduler.step()
@@ -874,6 +894,7 @@ def main() -> None:
             "epoch": epoch,
             "flowers/train_loss": train_loss,
             "flowers/train_accuracy": train_accuracy,
+            "flowers/train_top5_accuracy": train_top5_accuracy,
             "flowers/validation_loss": val_metrics["loss"],
             "flowers/validation_accuracy": validation_accuracy,
             "flowers/validation_accuracy_min": running_stats.get("validation_accuracy_min"),
