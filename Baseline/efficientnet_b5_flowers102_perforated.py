@@ -1070,8 +1070,14 @@ def main() -> None:
     pai_system_name = args.perforated_load_path if args.perforated_load_path else "PAI"
 
     # Keep these directories available for tracker CSV export variants.
+    os.makedirs(args.output_dir, exist_ok=True)
     os.makedirs(pai_system_name, exist_ok=True)
     os.makedirs(os.path.join(pai_system_name, args.output_dir), exist_ok=True)
+
+    # DEBUG
+    print(f"PAI system name/path: {pai_system_name}")
+    print(f"Output dir: {args.output_dir}")
+    print(f"Current working directory: {os.getcwd()}")
 
     if args.perforated_load_path:
         model = UPA.initialize_pai(model, save_name=pai_system_name)
@@ -1081,7 +1087,7 @@ def main() -> None:
             except Exception as exc:
                 print(f"PerforatedAI load_system failed: {exc}. Continuing with initialized model.")
     else:
-        model = UPA.initialize_pai(model)
+        model = UPA.initialize_pai(model, save_name=pai_system_name)
 
     print(model.classifier_fc)
 
