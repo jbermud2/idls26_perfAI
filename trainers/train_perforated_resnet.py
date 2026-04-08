@@ -1010,6 +1010,9 @@ def main(args, wandb_run=None):
         train_acc1 = GPA.pai_tracker.member_vars.get("extra_scores", {}).get("Train Acc 1", 0.0)
         train_acc5 = GPA.pai_tracker.member_vars.get("extra_scores", {}).get("Train Acc 5", 0.0)
         param_count  = UPA.count_params(model)
+        total_params = sum(p.numel() for p in model.parameters())
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        non_trainable_params = total_params - trainable_params
         num_dendrites = GPA.pai_tracker.member_vars.get("num_dendrites_added", 0)
 
         # ---- running min/max -----------------------------------------------
@@ -1066,6 +1069,10 @@ def main(args, wandb_run=None):
             "perforatedai/seconds_per_training_epoch":        seconds_per_training_epoch,
             "perforatedai/seconds_per_training_cycle":        seconds_per_training_cycle,
             # Model size
+            "model/num_parameters":                           float(total_params),
+            "model/trainable_parameters":                     float(trainable_params),
+            "model/non_trainable_parameters":                 float(non_trainable_params),
+            "perforatedai/restructured":                      float(bool(restructured)),
             "Param Count":                                    param_count,
             "Dendrite Count":                                 num_dendrites,
         }

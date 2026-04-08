@@ -890,8 +890,14 @@ def main() -> None:
             except Exception as exc:
                 print(f"Failed to save best model to {best_model_path}: {exc}")
 
+        num_params, trainable_params = count_parameters(model)
+        non_trainable_params = num_params - trainable_params
+
         epoch_log: Dict[str, Optional[float]] = {
             "epoch": epoch,
+            "model/num_parameters": float(num_params),
+            "model/trainable_parameters": float(trainable_params),
+            "model/non_trainable_parameters": float(non_trainable_params),
             "flowers/train_loss": train_loss,
             "flowers/train_accuracy": train_accuracy,
             "flowers/train_top5_accuracy": train_top5_accuracy,
