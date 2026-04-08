@@ -1,7 +1,7 @@
 '''
-For running:
-export $WANDB_API_KEY=your_key_here or add --wandb-api-key
-python efficientnet_b5_flowers102.py --data-root ./data --use-wandb 
+For running (from repository root):
+  export WANDB_API_KEY=your_key_here   # or pass --wandb-api-key
+  python experiments/flowers102/efficientnet_b5_baseline.py --data-root ./data --use-wandb
 '''
 
 from __future__ import annotations

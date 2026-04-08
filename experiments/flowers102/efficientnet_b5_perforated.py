@@ -1,7 +1,9 @@
 '''
-For running:
-export $WANDB_API_KEY=your_key_here or add --wandb-api-key
-python efficientnet_b5_flowers102_perforated.py --data-root ./data --use-wandb --wandb-api-key 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 --dendrite-mode 1 --max-dendrites 5 --pai-forward-function relu --improvement-threshold 0 --candidate-weight-init-mult 0.1
+For running (from repository root):
+  export WANDB_API_KEY=your_key_here   # or pass --wandb-api-key
+  python experiments/flowers102/efficientnet_b5_perforated.py --data-root ./data --use-wandb \\
+    --dendrite-mode 1 --max-dendrites 5 --pai-forward-function relu \\
+    --improvement-threshold 0 --candidate-weight-init-mult 0.1
 '''
 
 from __future__ import annotations

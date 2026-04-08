@@ -1,13 +1,13 @@
 """
-CUDA_VISIBLE_DEVICES=0 python train_perforated_resnet.py --model resnet18 --batch-size 32 --lr 0.0125 --val-resize-size 256 --val-crop-size 224 --train-crop-size 224 --data-path /ocean/projects/cis260045p/shared/data/imagenet --convert-count 0 --dendrite-mode 1 --improvement-threshold 1 --candidate-weight-init-mult 0.1 --pai-forward-function relu --use-wandb --wandb-project IMAGENET_PERFORATED --workers 10 --max-dendrites 3
+CUDA_VISIBLE_DEVICES=0 python trainers/train_perforated_resnet.py --model resnet18 --batch-size 32 --lr 0.0125 --val-resize-size 256 --val-crop-size 224 --train-crop-size 224 --data-path /ocean/projects/cis260045p/shared/data/imagenet --convert-count 0 --dendrite-mode 1 --improvement-threshold 1 --candidate-weight-init-mult 0.1 --pai-forward-function relu --use-wandb --wandb-project IMAGENET_PERFORATED --workers 10 --max-dendrites 3
 
 usage:
-CUDA_VISIBLE_DEVICES=0 python -m pdb train_fast_perforatedai_from_config.py --model resnet18 --batch-size 32 --lr 0.0125 --val-resize-size 256 --val-crop-size 224 --train-crop-size 224 --full-dataset --data-path /home/rbrenner/Datasets/imagenet --convert-count 0 --dendrite-mode 2 --improvement-threshold 1 --candidate-weight-init-mult 0.1 --pai-forward-function relu
+CUDA_VISIBLE_DEVICES=0 python -m pdb trainers/train_perforated_resnet.py --model resnet18 --batch-size 32 --lr 0.0125 --val-resize-size 256 --val-crop-size 224 --train-crop-size 224 --full-dataset --data-path /home/rbrenner/Datasets/imagenet --convert-count 0 --dendrite-mode 2 --improvement-threshold 1 --candidate-weight-init-mult 0.1 --pai-forward-function relu
 """
 
 
 """
-CUDA_VISIBLE_DEVICES=1 python -m pdb train_fast_perforatedai_from_config.py --model resnet50 --batch-size 32 --lr 0.0125 --val-resize-size 256 --val-crop-size 224 --train-crop-size 224 --full-dataset --data-path /home/rbrenner/Datasets/imagenet --convert-count 0 --dendrite-mode 1 --improvement-threshold 1 --candidate-weight-init-mult 0.1 --pai-forward-function relu --perforated-load-path resnet50_c0_wd0.0001_dmode1_20260128_174922
+CUDA_VISIBLE_DEVICES=1 python -m pdb trainers/train_perforated_resnet.py --model resnet50 --batch-size 32 --lr 0.0125 --val-resize-size 256 --val-crop-size 224 --train-crop-size 224 --full-dataset --data-path /home/rbrenner/Datasets/imagenet --convert-count 0 --dendrite-mode 1 --improvement-threshold 1 --candidate-weight-init-mult 0.1 --pai-forward-function relu --perforated-load-path resnet50_c0_wd0.0001_dmode1_20260128_174922
 
 """
 
@@ -36,7 +36,7 @@ Test:  Acc@1 73.040 Acc@5 91.420
 Test:  Acc@1 61.660 Acc@5 85.200
 
 current command, maybe working?:
-CUDA_VISIBLE_DEVICES=0 python train_fast_perforatedai_from_config.py     --model resnet18     --batch-size 32     --lr 0.0125     --val-resize-size 256     --val-crop-size 224     --train-crop-size 224     --full-dataset     --data-path /home/rbrenner/Datasets/imagenet     --convert-count 0     --dendrite-mode 1     --improvement-threshold 0     --candidate-weight-init-mult 0.1     --pai-forward-function relu --perforated-load-path resnet18_c0_wd0.0001_dmode1_20260112_205006
+CUDA_VISIBLE_DEVICES=0 python trainers/train_perforated_resnet.py     --model resnet18     --batch-size 32     --lr 0.0125     --val-resize-size 256     --val-crop-size 224     --train-crop-size 224     --full-dataset     --data-path /home/rbrenner/Datasets/imagenet     --convert-count 0     --dendrite-mode 1     --improvement-threshold 0     --candidate-weight-init-mult 0.1     --pai-forward-function relu --perforated-load-path resnet18_c0_wd0.0001_dmode1_20260112_205006
 
 
 
@@ -96,7 +96,7 @@ parameters_dict = {
 
 
 # ---------------------------------------------------------------------------
-# W&B helper functions (modelled after mnist_perf.py)
+# W&B helper functions (modelled after experiments/mnist/cnn_perforated.py)
 # ---------------------------------------------------------------------------
 
 def init_wandb(args):
@@ -846,7 +846,7 @@ def main(args, wandb_run=None):
     data_loader_test = torch.utils.data.DataLoader(
         dataset_test, batch_size=args.batch_size, sampler=test_sampler, num_workers=args.workers, pin_memory=True
     )
-    # Match mnist_perf.py metric setup: CPU batch=1, GPU batch=100 for inference throughput.
+    # Match experiments/mnist/cnn_perforated.py metric setup: CPU batch=1, GPU batch=100 for inference throughput.
     cpu_benchmark_loader = torch.utils.data.DataLoader(
         dataset_test, batch_size=1, sampler=test_sampler, num_workers=args.workers, pin_memory=True
     )
@@ -976,7 +976,7 @@ def main(args, wandb_run=None):
     epoch = args.start_epoch - 1
 
     # -----------------------------------------------------------------------
-    # Tracking variables (mirrors mnist_perf.py pattern)
+    # Tracking variables (mirrors experiments/mnist/cnn_perforated.py pattern)
     # -----------------------------------------------------------------------
     running_stats = {}
     best_validation_accuracy = float("-inf")
@@ -1040,7 +1040,7 @@ def main(args, wandb_run=None):
             global_max_train = train_acc1
             global_max_params = param_count
 
-        # ---- per-epoch W&B log (matches mnist_perf metric names) -----------
+        # ---- per-epoch W&B log (matches experiments/mnist/cnn_perforated metric names) -----------
         epoch_log = {
             "epoch":                                          epoch,
             # Core accuracy
@@ -1062,7 +1062,7 @@ def main(args, wandb_run=None):
             "perforatedai/train_acc1_max": running_stats.get("train_acc1_max"),
             "perforatedai/train_acc5_min": running_stats.get("train_acc5_min"),
             "perforatedai/train_acc5_max": running_stats.get("train_acc5_max"),
-            # Timing (matches mnist_perf exactly)
+            # Timing (matches experiments/mnist/cnn_perforated exactly)
             "perforatedai/seconds_per_training_epoch":        seconds_per_training_epoch,
             "perforatedai/seconds_per_training_cycle":        seconds_per_training_cycle,
             # Model size
