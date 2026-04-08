@@ -1,0 +1,10 @@
+wandb/
+outputs/
+slurm_out/
+data/
+*.pt
+*.pth
+*.png
+__pycache__/
+.DS_Store
+.ipynb_checkpoints/
