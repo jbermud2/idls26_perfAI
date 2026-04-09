@@ -870,7 +870,6 @@ def main() -> None:
             "perforatedai/test_auc": safe_number(test_metrics["auc"]),
             "perforatedai/test_auc_min": running_stats.get("test_auc_min"),
             "perforatedai/test_auc_max": running_stats.get("test_auc_max"),
-            "perforatedai/precision_at_1": test_metrics["precision_at_1"],
             "perforatedai/seconds_per_training_epoch": seconds_per_training_epoch,
             "perforatedai/seconds_per_training_cycle": seconds_per_training_cycle,
         }
@@ -918,35 +917,21 @@ def main() -> None:
     latency_ms = benchmark_cpu_latency_single_core_ms(model_cpu, cpu_benchmark_loader)
     param_count, flops, flops_source = compute_model_stats(model_cpu, torch.device("cpu"))
 
-    final_metrics: Dict[str, object] = {
+    # Post-training benchmark metrics only (best-validation curves stay in epoch logs).
+    final_wandb_metrics: Dict[str, object] = {
         "perforatedai/gpu_inference_inputs_per_second": safe_number(gpu_inference_ips),
         "perforatedai/cpu_inference_inputs_per_second": safe_number(cpu_inference_ips),
-        "efficientnet/num_parameters": param_count,
-        "efficientnet/flops": safe_number(flops),
-        "efficientnet/flops_source": flops_source,
-        "efficientnet/latency_ms_per_batch": safe_number(latency_ms),
+        "model/num_parameters": param_count,
+        "model/flops": safe_number(flops),
+        "model/flops_source": flops_source,
+        "model/latency_ms_per_batch": safe_number(latency_ms),
     }
 
-    if best_validation_snapshot and safe_number(latency_ms) is not None:
-        final_metrics["efficientnet/accuracy_vs_flops"] = best_validation_snapshot[
-            "test_accuracy_at_best_validation"
-        ]
-        final_metrics["perforatedai/test_auc_at_best_validation"] = safe_number(
-            best_validation_snapshot["test_auc_at_best_validation"]
-        )
-        final_metrics["perforatedai/validation_accuracy_best"] = best_validation_snapshot[
-            "validation_accuracy_best"
-        ]
-        final_metrics["perforatedai/validation_auc_at_best_validation"] = safe_number(
-            best_validation_snapshot["validation_auc_at_best_validation"]
-        )
-        final_metrics["perforatedai/epoch_at_best_validation"] = best_validation_snapshot[
-            "epoch_at_best_validation"
-        ]
-
-    print(f"Final performance metrics: {final_metrics}")
+    print(f"Final benchmark metrics (W&B): {final_wandb_metrics}")
+    if best_validation_snapshot:
+        print(f"Best-validation snapshot (already logged each epoch): {best_validation_snapshot}")
     if run is not None:
-        log_to_wandb(run, final_metrics)
+        log_to_wandb(run, final_wandb_metrics)
         finish_wandb(run)
 
     if args.save_model:
