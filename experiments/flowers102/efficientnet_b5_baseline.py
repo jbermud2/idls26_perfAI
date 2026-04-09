@@ -915,7 +915,6 @@ def main() -> None:
             "flowers/test_top5_accuracy": test_metrics["accuracy_top5"],
             "flowers/test_top5_min": running_stats.get("test_top5_min"),
             "flowers/test_top5_max": running_stats.get("test_top5_max"),
-            "flowers/precision_at_1": test_metrics["precision_at_1"],
             "flowers/seconds_per_training_epoch": seconds_per_training_epoch,
             "flowers/seconds_per_training_cycle": seconds_per_training_cycle,
             "flowers/learning_rate": optimizer.param_groups[0]["lr"],
@@ -964,35 +963,21 @@ def main() -> None:
     latency_ms = benchmark_cpu_latency_single_core_ms(model_cpu, cpu_benchmark_loader)
     param_count, flops, flops_source = compute_model_stats(model_cpu, torch.device("cpu"), crop_size)
 
-    final_metrics: Dict[str, object] = {
+    # Post-training benchmark metrics only (best-validation curves stay in epoch logs).
+    final_wandb_metrics: Dict[str, object] = {
         "flowers/gpu_inference_inputs_per_second": safe_number(gpu_inference_ips),
         "flowers/cpu_inference_inputs_per_second": safe_number(cpu_inference_ips),
-        "efficientnet_b5/num_parameters": param_count,
-        "efficientnet_b5/flops": safe_number(flops),
-        "efficientnet_b5/flops_source": flops_source,
-        "efficientnet_b5/latency_ms_per_batch": safe_number(latency_ms),
+        "model/num_parameters": param_count,
+        "model/flops": safe_number(flops),
+        "model/flops_source": flops_source,
+        "model/latency_ms_per_batch": safe_number(latency_ms),
     }
 
+    print(f"Final benchmark metrics (W&B): {final_wandb_metrics}")
     if best_validation_snapshot:
-        final_metrics["efficientnet_b5/accuracy_at_best_validation"] = best_validation_snapshot[
-            "test_accuracy_at_best_validation"
-        ]
-        final_metrics["flowers/test_top5_at_best_validation"] = best_validation_snapshot[
-            "test_top5_at_best_validation"
-        ]
-        final_metrics["flowers/validation_accuracy_best"] = best_validation_snapshot[
-            "validation_accuracy_best"
-        ]
-        final_metrics["flowers/validation_top5_at_best_validation"] = best_validation_snapshot[
-            "validation_top5_at_best_validation"
-        ]
-        final_metrics["flowers/epoch_at_best_validation"] = best_validation_snapshot[
-            "epoch_at_best_validation"
-        ]
-
-    print(f"Final performance metrics: {final_metrics}")
+        print(f"Best-validation snapshot (already logged each epoch): {best_validation_snapshot}")
     if run is not None:
-        log_to_wandb(run, final_metrics)
+        log_to_wandb(run, final_wandb_metrics)
         finish_wandb(run)
 
     if args.save_model:
