@@ -1,7 +1,7 @@
 '''
 For running:
 export $WANDB_API_KEY=your_key_here or add --wandb-api-key
-python efficientnet_b5_flowers102_perforated.py --data-root ./data --use-wandb --wandb-api-key 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 --dendrite-mode 1 --max-dendrites 5 --pai-forward-function relu --improvement-threshold 0 --candidate-weight-init-mult 0.1
+python flowers_perforated_parallel.py --data-root ./data --use-wandb --wandb-api-key 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 --dendrite-mode 1 --max-dendrites 5 --pai-forward-function relu --improvement-threshold 0 --candidate-weight-init-mult 0.1 --epochs 40
 '''
 
 from __future__ import annotations
@@ -124,8 +124,12 @@ class EfficientNetB5PAI(nn.Module):
 
 def configure_pai(args) -> None:
     GPA.pc.set_testing_dendrite_capacity(False)
+    # Only track the pre-FC layer; explicitly exclude classifier_fc to avoid stale state during switch.
     GPA.pc.module_ids_to_track = [".pre_fc"]
     GPA.pc.set_only_track_specified_modules(True)
+    # Ensure classifier_fc is never tracked, even if it appears in loaded checkpoints.
+    if hasattr(GPA.pc, "set_module_ids_to_not_track"):
+        GPA.pc.set_module_ids_to_not_track([".classifier_fc"])
     GPA.pc.set_verbose(True)
 
     # Avoid interactive pdb stop on weight-decay warnings in non-interactive runs.
@@ -618,6 +622,12 @@ def _state_dict_without_pai_metadata(model: nn.Module) -> Dict[str, torch.Tensor
     state_dict = model.state_dict()
     # tracker_string can change size across epochs/PAI internal transitions.
     state_dict.pop("tracker_string", None)
+    # Remove stale dendrite keys from modules that should not be tracked (e.g., classifier_fc).
+    # This prevents PAI from trying to reconstruct them during switch_mode.
+    keys_to_remove = [k for k in state_dict.keys() if "dendrite_module" in k and ".classifier_fc" in k]
+    for key in keys_to_remove:
+        state_dict.pop(key, None)
+        print(f"Excluded stale dendrite key from save: {key}")
     return state_dict
 
 
@@ -631,7 +641,16 @@ def _load_state_dict_compatible(model: nn.Module, checkpoint_path: str, device: 
     if not isinstance(loaded, dict):
         raise RuntimeError(f"Unexpected checkpoint format at {checkpoint_path}: {type(loaded)}")
 
+    # Remove volatile PAI metadata and any stale dendrite keys from untracked modules.
     loaded.pop("tracker_string", None)
+    
+    # Aggressively filter out stale dendrite keys that shouldn't be in the model.
+    # This prevents PAI from trying to reconstruct dendrites for modules like classifier_fc.
+    keys_to_remove = [k for k in loaded.keys() if "dendrite_module" in k and ".classifier_fc" in k]
+    for key in keys_to_remove:
+        loaded.pop(key, None)
+        print(f"Removed stale dendrite key from loaded dict: {key}")
+    
     incompatible = model.load_state_dict(loaded, strict=False)
     if incompatible.missing_keys or incompatible.unexpected_keys:
         print(
