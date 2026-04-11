@@ -1,22 +1,31 @@
 '''
 For running:
-export $WANDB_API_KEY=your_key_here or add --wandb-api-key
-python flowers_perforated_parallel.py --data-root ./data --use-wandb --wandb-api-key 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 --dendrite-mode 1 --max-dendrites 5 --pai-forward-function relu --improvement-threshold 0 --candidate-weight-init-mult 0.1 --epochs 40
+interact -p GPU-shared --gres=gpu:v100-32:2 -t 8:00:00 -A cis260045p
+python -m torch.distributed.run --nproc_per_node 2 /ocean/projects/cis260045p/shared/flowers_perforated_parallel.py --data-root ./data --use-wandb --wandb-api-key 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 --dendrite-mode 1 --max-dendrites 5 --pai-forward-function relu --improvement-threshold 0.5 --candidate-weight-init-mult 0.1 --epochs 40 > output.txt 2>&1
 '''
 
 from __future__ import annotations
 
 import argparse
+import builtins
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 import math
 import os
+import pdb
 import shutil
+import sys
 import time
-from typing import Dict, Tuple, Optional
+import warnings
+from typing import Dict, Tuple, Optional, Generator
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+import torch.distributed as dist
+from torch.distributed.elastic.multiprocessing.errors import record
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torchvision import datasets, transforms
 from torchvision.models import efficientnet_b5
@@ -51,6 +60,34 @@ FLOWERS_DATASET_ROOT_DEFAULT = "./data"
 NUM_CLASSES = 102
 DEFAULT_CROP_SIZE = 456
 DEFAULT_RESIZE_SIZE = 466
+DEFAULT_PAI_CONVERT_TARGET = "pre_fc"
+
+
+def disable_interactive_breakpoints() -> None:
+    """Disable breakpoint()/pdb.set_trace() in non-interactive training runs."""
+    os.environ.setdefault("PYTHONBREAKPOINT", "0")
+
+    def _noop_breakpoint(*args, **kwargs):
+        return None
+
+    def _noop_exit(*args, **kwargs):
+        return None
+
+    builtins.breakpoint = _noop_breakpoint
+    pdb.set_trace = _noop_breakpoint
+    # Some external libraries call exit()/quit() from interactive checks.
+    # Treat these as no-ops in batch training instead of terminating the job.
+    builtins.exit = _noop_exit
+    builtins.quit = _noop_exit
+    sys.exit = _noop_exit
+
+
+@contextmanager
+def suppress_output() -> Generator[None, None, None]:
+    """Temporarily silence stdout/stderr for noisy library calls."""
+    with open(os.devnull, "w") as devnull:
+        with redirect_stdout(devnull), redirect_stderr(devnull):
+            yield
 
 
 def _efficientnet_b5_imagenet_weights():
@@ -122,15 +159,63 @@ class EfficientNetB5PAI(nn.Module):
         return x
 
 
+def _selected_convert_module_id(args) -> str:
+    return ".classifier_fc" if args.pai_convert_target == "classifier_fc" else ".pre_fc"
+
+
 def configure_pai(args) -> None:
     GPA.pc.set_testing_dendrite_capacity(False)
-    # Only track the pre-FC layer; explicitly exclude classifier_fc to avoid stale state during switch.
-    GPA.pc.module_ids_to_track = [".pre_fc"]
-    GPA.pc.set_only_track_specified_modules(True)
-    # Ensure classifier_fc is never tracked, even if it appears in loaded checkpoints.
-    if hasattr(GPA.pc, "set_module_ids_to_not_track"):
-        GPA.pc.set_module_ids_to_not_track([".classifier_fc"])
-    GPA.pc.set_verbose(True)
+    # Reset all selector lists so behavior is deterministic across fresh processes,
+    # torchrun workers, and prior interactive sessions.
+    for setter_name in [
+        "set_module_ids_to_track",
+        "set_module_ids_to_convert",
+        "set_module_names_to_track",
+        "set_module_names_to_convert",
+        "set_modules_to_track",
+        "set_modules_to_convert",
+    ]:
+        if hasattr(GPA.pc, setter_name):
+            try:
+                getattr(GPA.pc, setter_name)([])
+            except Exception:
+                pass
+
+    # EXPLICIT approach: Only specify what to convert, rely on PAI defaults for rest.
+    # This is more robust than exclusion lists which may have version-dependent semantics.
+    convert_module_id = _selected_convert_module_id(args)
+
+    # Clear any tracking filters first—we only want to convert one specific module.
+    if hasattr(GPA.pc, "set_module_ids_to_track"):
+        try:
+            GPA.pc.set_module_ids_to_track([])
+        except Exception:
+            pass
+
+    # Explicitly set ONLY the target module for conversion.
+    if hasattr(GPA.pc, "set_module_ids_to_convert"):
+        GPA.pc.set_module_ids_to_convert([convert_module_id])
+    else:
+        # Fallback for older PAI versions
+        try:
+            GPA.pc.module_ids_to_convert = [convert_module_id]
+        except Exception:
+            pass
+    # Keep PAI internals quiet during regular training runs.
+    GPA.pc.set_verbose(False)
+
+    # Helpful runtime visibility only when strict debug checks are enabled.
+    if args.strict_unwrapped_check or args.strict_weight_decay_check:
+        try:
+            print("PAI selectors:")
+            if hasattr(GPA.pc, "get_module_ids_to_track"):
+                print("  module_ids_to_track:", GPA.pc.get_module_ids_to_track())
+            if hasattr(GPA.pc, "get_module_ids_to_convert"):
+                print("  module_ids_to_convert:", GPA.pc.get_module_ids_to_convert())
+            if hasattr(GPA.pc, "get_module_names_to_convert"):
+                print("  module_names_to_convert:", GPA.pc.get_module_names_to_convert())
+        except Exception:
+            pass
 
     # Avoid interactive pdb stop on weight-decay warnings in non-interactive runs.
     if hasattr(GPA.pc, "set_weight_decay_accepted") and not args.strict_weight_decay_check:
@@ -171,16 +256,18 @@ def configure_pai(args) -> None:
 
 
 def setup_pai_optimizer_scheduler(args, model: nn.Module):
+    model_for_optim = model.module if isinstance(model, DDP) else model
+
     GPA.pai_tracker.set_optimizer(optim.AdamW)
     GPA.pai_tracker.set_scheduler(CosineAnnealingLR)
 
     # Ensure at least the task head remains trainable after wrapping/loading.
     for name in ["pre_fc", "classifier_fc"]:
-        if hasattr(model, name):
-            for p in getattr(model, name).parameters():
+        if hasattr(model_for_optim, name):
+            for p in getattr(model_for_optim, name).parameters():
                 p.requires_grad = True
 
-    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    trainable_params = [p for p in model_for_optim.parameters() if p.requires_grad]
     if len(trainable_params) == 0:
         raise RuntimeError(
             "No trainable parameters found (all layers are frozen). "
@@ -193,7 +280,7 @@ def setup_pai_optimizer_scheduler(args, model: nn.Module):
         "weight_decay": args.weight_decay,
     }
     sched_args = {"T_max": max(1, args.epochs)}
-    return GPA.pai_tracker.setup_optimizer(model, optim_args, sched_args)
+    return GPA.pai_tracker.setup_optimizer(model_for_optim, optim_args, sched_args)
 
 
 def _resolve_pai_save_name(output_dir: str, save_name: str) -> str:
@@ -251,7 +338,8 @@ def ensure_pai_png(output_dir: str, model: nn.Module, save_name: str = "PAI") ->
             (model, resolved_save_name),
         ]:
             try:
-                UPA.save_system(*call_args)
+                with suppress_output():
+                    UPA.save_system(*call_args)
                 break
             except Exception as exc:
                 save_errors.append(f"save_system{call_args[1:]} -> {exc}")
@@ -270,6 +358,122 @@ def ensure_pai_png(output_dir: str, model: nn.Module, save_name: str = "PAI") ->
         f"  - {checked}\n"
         f"save_system errors:\n{error_text}"
     )
+
+
+def ensure_pai_switch_files_exist(
+    pai_system_name: str,
+    model: nn.Module,
+    *,
+    is_distributed: bool,
+    is_main_process: bool,
+) -> None:
+    """Ensure PerforatedAI switch-mode checkpoint files exist in a DDP-safe way."""
+    pai_root = os.path.abspath(os.path.normpath(pai_system_name))
+    os.makedirs(pai_root, exist_ok=True)
+
+    best_model_path = os.path.join(pai_root, "best_model.pt")
+    latest_path = os.path.join(pai_root, "latest.pt")
+
+    # Own file creation on rank 0 to avoid races/no-op saves on non-owner ranks.
+    if is_main_process:
+        if not os.path.exists(latest_path) and hasattr(UPA, "save_system"):
+            with suppress_output():
+                UPA.save_system(model, pai_root, "latest")
+        if not os.path.exists(best_model_path) and hasattr(UPA, "save_system"):
+            with suppress_output():
+                UPA.save_system(model, pai_root, "best_model")
+
+        # Fallback for environments that only produced latest.
+        if not os.path.exists(best_model_path) and os.path.exists(latest_path):
+            shutil.copyfile(latest_path, best_model_path)
+
+    if is_distributed:
+        dist.barrier()
+
+    if not os.path.exists(best_model_path):
+        raise RuntimeError(f"Missing required PAI switch file after seeding: {best_model_path}")
+
+
+def is_dist_avail_and_initialized() -> bool:
+    if not dist.is_available():
+        return False
+    if not dist.is_initialized():
+        return False
+    return True
+
+
+def setup_for_distributed(is_master: bool) -> None:
+    """Disable printing when not in the master process."""
+    builtin_print = builtins.print
+
+    def print(*args, **kwargs):
+        force = kwargs.pop("force", False)
+        if is_master or force:
+            builtin_print(*args, **kwargs)
+
+    builtins.print = print
+
+
+def get_world_size() -> int:
+    if not is_dist_avail_and_initialized():
+        return 1
+    return dist.get_world_size()
+
+
+def get_rank() -> int:
+    if not is_dist_avail_and_initialized():
+        return 0
+    return dist.get_rank()
+
+
+def is_main_process_rank() -> bool:
+    return get_rank() == 0
+
+
+def save_on_master(*args, **kwargs) -> None:
+    if is_main_process_rank():
+        torch.save(*args, **kwargs)
+
+
+def init_distributed_mode(args) -> None:
+    dist_url = getattr(args, "dist_url", "env://")
+    if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
+        if dist_url == "env://":
+            # Allow single-node launches that inherit RANK/WORLD_SIZE without a full rendezvous setup.
+            os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+            os.environ.setdefault("MASTER_PORT", "29500")
+        args.rank = int(os.environ["RANK"])
+        args.world_size = int(os.environ["WORLD_SIZE"])
+        args.gpu = int(os.environ.get("LOCAL_RANK", "0"))
+    elif "SLURM_PROCID" in os.environ:
+        args.rank = int(os.environ["SLURM_PROCID"])
+        args.world_size = int(os.environ.get("WORLD_SIZE", torch.cuda.device_count() or 1))
+        args.gpu = args.rank % max(torch.cuda.device_count(), 1)
+    else:
+        print("Not using distributed mode")
+        args.distributed = False
+        args.rank = 0
+        args.world_size = 1
+        args.gpu = 0
+        args.local_rank = 0
+        return
+
+    args.distributed = True
+    args.local_rank = args.gpu
+
+    if torch.cuda.is_available():
+        torch.cuda.set_device(args.gpu)
+    args.dist_backend = "nccl" if torch.cuda.is_available() else "gloo"
+    args.dist_url = dist_url
+    print(f"| distributed init (rank {args.rank}): {args.dist_url}", flush=True)
+    dist.init_process_group(
+        backend=args.dist_backend,
+        init_method=dist_url,
+        world_size=args.world_size,
+        rank=args.rank,
+    )
+    dist.barrier()
+    setup_for_distributed(args.rank == 0)
 
 
 def build_transforms() -> Tuple[transforms.Compose, transforms.Compose, transforms.Compose, int]:
@@ -617,21 +821,33 @@ def update_min_max(stats: Dict[str, float], key: str, value) -> None:
     stats[f"{key}_max"] = max(stats.get(f"{key}_max", value), value)
 
 
-def _state_dict_without_pai_metadata(model: nn.Module) -> Dict[str, torch.Tensor]:
+def _state_dict_without_pai_metadata(
+    model: nn.Module,
+    disallowed_module_id: Optional[str] = None,
+) -> Dict[str, torch.Tensor]:
     """Return a state_dict with volatile PAI metadata removed."""
     state_dict = model.state_dict()
     # tracker_string can change size across epochs/PAI internal transitions.
     state_dict.pop("tracker_string", None)
-    # Remove stale dendrite keys from modules that should not be tracked (e.g., classifier_fc).
+    # Remove stale dendrite keys from modules that should not be converted.
     # This prevents PAI from trying to reconstruct them during switch_mode.
-    keys_to_remove = [k for k in state_dict.keys() if "dendrite_module" in k and ".classifier_fc" in k]
+    keys_to_remove = []
+    if disallowed_module_id:
+        keys_to_remove = [
+            k for k in state_dict.keys() if "dendrite_module" in k and disallowed_module_id in k
+        ]
     for key in keys_to_remove:
         state_dict.pop(key, None)
         print(f"Excluded stale dendrite key from save: {key}")
     return state_dict
 
 
-def _load_state_dict_compatible(model: nn.Module, checkpoint_path: str, device: torch.device) -> None:
+def _load_state_dict_compatible(
+    model: nn.Module,
+    checkpoint_path: str,
+    device: torch.device,
+    disallowed_module_id: Optional[str] = None,
+) -> None:
     """Load a checkpoint while tolerating volatile PAI metadata keys."""
     try:
         loaded = torch.load(checkpoint_path, map_location=device, weights_only=True)
@@ -644,9 +860,10 @@ def _load_state_dict_compatible(model: nn.Module, checkpoint_path: str, device: 
     # Remove volatile PAI metadata and any stale dendrite keys from untracked modules.
     loaded.pop("tracker_string", None)
     
-    # Aggressively filter out stale dendrite keys that shouldn't be in the model.
-    # This prevents PAI from trying to reconstruct dendrites for modules like classifier_fc.
-    keys_to_remove = [k for k in loaded.keys() if "dendrite_module" in k and ".classifier_fc" in k]
+    # Filter out stale dendrite keys from explicitly disallowed conversion modules.
+    keys_to_remove = []
+    if disallowed_module_id:
+        keys_to_remove = [k for k in loaded.keys() if "dendrite_module" in k and disallowed_module_id in k]
     for key in keys_to_remove:
         loaded.pop(key, None)
         print(f"Removed stale dendrite key from loaded dict: {key}")
@@ -659,6 +876,123 @@ def _load_state_dict_compatible(model: nn.Module, checkpoint_path: str, device: 
         )
 
 
+def _assert_disallowed_module_not_converted(model: nn.Module, disallowed_module_id: Optional[str]) -> None:
+    """Fail fast if PAI converted a module that should be excluded from conversion."""
+    if not disallowed_module_id:
+        return
+    model_for_check = model.module if isinstance(model, DDP) else model
+    state_keys = model_for_check.state_dict().keys()
+    bad_prefixes = (
+        f"{disallowed_module_id.lstrip('.')}.main_module.",
+        f"{disallowed_module_id.lstrip('.')}.dendrite_module.",
+    )
+    converted = [k for k in state_keys if k.startswith(bad_prefixes)]
+    if converted:
+        sample = converted[:5]
+        raise RuntimeError(
+            f"PAI converted {disallowed_module_id}, which is incompatible with this training setup. "
+            "This can cause missing dendrite values during switch_mode. "
+            f"Example converted keys: {sample}"
+        )
+
+
+def _load_state_dict_into_model(
+    model: nn.Module,
+    state_dict: Dict[str, torch.Tensor],
+    disallowed_module_id: Optional[str] = None,
+) -> None:
+    """Load a state dict while tolerating volatile PAI metadata keys."""
+    cleaned_state_dict = dict(state_dict)
+    cleaned_state_dict.pop("tracker_string", None)
+    keys_to_remove = []
+    if disallowed_module_id:
+        keys_to_remove = [
+            k for k in cleaned_state_dict.keys() if "dendrite_module" in k and disallowed_module_id in k
+        ]
+    for key in keys_to_remove:
+        cleaned_state_dict.pop(key, None)
+    incompatible = model.load_state_dict(cleaned_state_dict, strict=False)
+    if incompatible.missing_keys or incompatible.unexpected_keys:
+        print(
+            "Loaded model state with non-strict compatibility. "
+            f"missing_keys={incompatible.missing_keys}, unexpected_keys={incompatible.unexpected_keys}"
+        )
+
+
+def _model_has_pai_modules(model: nn.Module) -> bool:
+    """Best-effort check that the model is still PAI-wrapped."""
+    model_for_check = model.module if isinstance(model, DDP) else model
+    try:
+        keys = model_for_check.state_dict().keys()
+    except Exception:
+        return False
+    # Require concrete wrapper markers; tracker_string alone is not sufficient.
+    markers = (".main_module.", ".dendrite_module.")
+    return any(any(marker in key for marker in markers) for key in keys)
+
+
+def _is_nonfatal_pai_system_exit(exc: BaseException) -> bool:
+    """Treat known PAI interactive exit codes as non-fatal in batch training."""
+    if not isinstance(exc, SystemExit):
+        return False
+    code = exc.code
+    return code in (-1, 0, None, "-1", "0")
+
+
+def _call_pai_add_validation_score(args, validation_accuracy: float, model: nn.Module):
+    """Call PAI validation score hook with optional debug logging enabled."""
+    if args.debug_pai_switch_logs:
+        return GPA.pai_tracker.add_validation_score(validation_accuracy, model)
+    with suppress_output():
+        return GPA.pai_tracker.add_validation_score(validation_accuracy, model)
+
+
+def recover_pai_model_if_needed(model: nn.Module, pai_system_name: str) -> nn.Module:
+    """Re-initialize/load PAI when wrapper markers are missing."""
+    if _model_has_pai_modules(model):
+        return model
+
+    with suppress_output():
+        model = UPA.initialize_pai(model, save_name=pai_system_name)
+    latest_path = os.path.join(os.path.abspath(os.path.normpath(pai_system_name)), "latest.pt")
+    if hasattr(UPA, "load_system") and os.path.exists(latest_path):
+        try:
+            with suppress_output():
+                model = UPA.load_system(model, pai_system_name, "latest", True)
+        except BaseException as exc:
+            print(f"PAI recovery load_system failed: {exc}. Continuing with initialized model.")
+    return model
+
+
+def prepare_pai_switch_model(
+    model: nn.Module,
+    pai_system_name: str,
+    finetune_backbone: bool,
+    disallowed_module_id: Optional[str] = None,
+) -> nn.Module:
+    """Build a fresh PAI-wrapped model for switch_mode from the current training weights."""
+    model_for_switch = model.module if isinstance(model, DDP) else model
+    source_state_dict = model_for_switch.state_dict()
+
+    fresh_base_model = efficientnet_b5_flowers102(
+        num_classes=NUM_CLASSES,
+        finetune_backbone=finetune_backbone,
+    )
+    fresh_model = EfficientNetB5PAI(fresh_base_model)
+    _load_state_dict_into_model(fresh_model, source_state_dict, disallowed_module_id=disallowed_module_id)
+
+    with suppress_output():
+        fresh_model = UPA.initialize_pai(fresh_model, save_name=pai_system_name)
+    latest_path = os.path.join(os.path.abspath(os.path.normpath(pai_system_name)), "latest.pt")
+    if hasattr(UPA, "load_system") and os.path.exists(latest_path):
+        try:
+            with suppress_output():
+                fresh_model = UPA.load_system(fresh_model, pai_system_name, "latest", True)
+        except BaseException as exc:
+            print(f"PAI switch model load of latest failed: {exc}. Continuing with freshly initialized model.")
+    return fresh_model
+
+
 def train(
     args,
     model: nn.Module,
@@ -666,6 +1000,7 @@ def train(
     train_loader: torch.utils.data.DataLoader,
     optimizer: optim.Optimizer,
     epoch: int,
+    is_main_process: bool = True,
 ) -> Tuple[float, float, float]:
     """Standard supervised training loop using cross entropy on logits."""
     model.train()
@@ -688,7 +1023,7 @@ def train(
         total_loss += loss.item() * batch_size
         total_seen += batch_size
 
-        if batch_idx % args.log_interval == 0:
+        if is_main_process and batch_idx % args.log_interval == 0:
             print(
                 "Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}".format(
                     epoch,
@@ -708,9 +1043,27 @@ def train(
         _, pred_top5 = output.topk(maxk, dim=1, largest=True, sorted=True)
         correct_top5 += pred_top5.eq(target.view(-1, 1).expand_as(pred_top5)).sum()
 
-    train_accuracy = 100.0 * correct / len(train_loader.dataset)
-    train_top5_accuracy = 100.0 * correct_top5 / len(train_loader.dataset)
-    train_loss = total_loss / max(total_seen, 1)
+    # In DDP, reduce train totals so every rank reports global train metrics.
+    if dist.is_available() and dist.is_initialized():
+        stats = torch.tensor(
+            [
+                total_loss,
+                float(correct.item()),
+                float(correct_top5.item()),
+                float(total_seen),
+            ],
+            device=device,
+        )
+        dist.all_reduce(stats, op=dist.ReduceOp.SUM)
+        total_loss, correct_value, correct_top5_value, total_seen = [float(x) for x in stats.tolist()]
+    else:
+        correct_value = float(correct.item())
+        correct_top5_value = float(correct_top5.item())
+
+    denom = max(int(total_seen), 1)
+    train_accuracy = 100.0 * correct_value / denom
+    train_top5_accuracy = 100.0 * correct_top5_value / denom
+    train_loss = total_loss / denom
     return float(train_loss), float(train_accuracy), float(train_top5_accuracy)
 
 
@@ -722,26 +1075,36 @@ def evaluate(
     """Evaluate with cross entropy, top-1 and top-5 accuracy."""
     model.eval()
     model.to(device)
-    avg_loss = 0.0
-    correct = 0
-    correct_top5 = 0
+    total_loss = 0.0
+    correct = 0.0
+    correct_top5 = 0.0
+    total_seen = 0
 
     with torch.no_grad():
         for data, target in data_loader:
             data, target = data.to(device), target.to(device)
             output = model(data)
 
-            avg_loss += F.cross_entropy(output, target, reduction="sum").item()
+            batch_size = target.size(0)
+            total_loss += F.cross_entropy(output, target, reduction="sum").item()
+            total_seen += batch_size
             pred = output.argmax(dim=1, keepdim=True)
-            correct += pred.eq(target.view_as(pred)).sum()
+            correct += float(pred.eq(target.view_as(pred)).sum().item())
 
             maxk = min(5, output.size(1))
             _, pred_top5 = output.topk(maxk, dim=1, largest=True, sorted=True)
-            correct_top5 += pred_top5.eq(target.view(-1, 1).expand_as(pred_top5)).sum()
+            correct_top5 += float(pred_top5.eq(target.view(-1, 1).expand_as(pred_top5)).sum().item())
 
-    avg_loss /= len(data_loader.dataset)
-    accuracy = float(100.0 * correct / len(data_loader.dataset))
-    accuracy_top5 = float(100.0 * correct_top5 / len(data_loader.dataset))
+    # In DDP, reduce metrics so every rank sees identical validation/test values.
+    if dist.is_available() and dist.is_initialized():
+        stats = torch.tensor([total_loss, correct, correct_top5, float(total_seen)], device=device)
+        dist.all_reduce(stats, op=dist.ReduceOp.SUM)
+        total_loss, correct, correct_top5, total_seen = [float(x) for x in stats.tolist()]
+
+    denom = max(int(total_seen), 1)
+    avg_loss = total_loss / denom
+    accuracy = float(100.0 * correct / denom)
+    accuracy_top5 = float(100.0 * correct_top5 / denom)
 
     return {
         "loss": avg_loss,
@@ -756,26 +1119,29 @@ def test(
     device: torch.device,
     val_loader: torch.utils.data.DataLoader,
     test_loader: torch.utils.data.DataLoader,
+    is_main_process: bool = True,
 ) -> Tuple[Dict[str, float], Dict[str, float]]:
     val_metrics = evaluate(model, device, val_loader)
     test_metrics = evaluate(model, device, test_loader)
-    print(
-        "\nValidation set: loss={:.4f}, top-1={:.2f}%, top-5={:.2f}%\n".format(
-            val_metrics["loss"],
-            val_metrics["accuracy"],
-            val_metrics["accuracy_top5"],
+    if is_main_process:
+        print(
+            "\nValidation set: loss={:.4f}, top-1={:.2f}%, top-5={:.2f}%\n".format(
+                val_metrics["loss"],
+                val_metrics["accuracy"],
+                val_metrics["accuracy_top5"],
+            )
         )
-    )
-    print(
-        "Test set: loss={:.4f}, top-1={:.2f}%, top-5={:.2f}%\n".format(
-            test_metrics["loss"],
-            test_metrics["accuracy"],
-            test_metrics["accuracy_top5"],
+        print(
+            "Test set: loss={:.4f}, top-1={:.2f}%, top-5={:.2f}%\n".format(
+                test_metrics["loss"],
+                test_metrics["accuracy"],
+                test_metrics["accuracy_top5"],
+            )
         )
-    )
     return val_metrics, test_metrics
 
 
+@record
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="PyTorch Flowers-102 transfer learning with EfficientNet-B5 + PerforatedAI."
@@ -993,6 +1359,16 @@ def main() -> None:
         help="Forward function for PerforatedAI added nodes",
     )
     parser.add_argument(
+        "--pai-convert-target",
+        type=str,
+        default=DEFAULT_PAI_CONVERT_TARGET,
+        choices=["pre_fc", "classifier_fc"],
+        help=(
+            "Module to convert with dendrites. "
+            "Default pre_fc targets layer n-1 (recommended for this PAI workflow)."
+        ),
+    )
+    parser.add_argument(
         "--perforated-load-path",
         type=str,
         default="",
@@ -1016,34 +1392,93 @@ def main() -> None:
         default=False,
         help="keep PerforatedAI weight-decay interactive check enabled (can pause in pdb)",
     )
+    parser.add_argument(
+        "--debug-pai-switch-logs",
+        action="store_true",
+        default=False,
+        help="show raw PerforatedAI output around add_validation_score for debugging",
+    )
+    parser.add_argument(
+        "--ddp-find-unused-parameters",
+        action="store_true",
+        default=False,
+        help="enable DDP unused-parameter detection (adds autograd overhead)",
+    )
+    parser.add_argument(
+        "--dist-url",
+        default="env://",
+        type=str,
+        help="url used to set up distributed training",
+    )
 
     args = parser.parse_args()
+
+    # Default to non-interactive behavior for long-running jobs.
+    # Keep interactive breakpoints only when strict checks are explicitly enabled.
+    if not args.strict_unwrapped_check and not args.strict_weight_decay_check:
+        disable_interactive_breakpoints()
+
+    # PerforatedAI internal scheduler paths can trigger this warning even when
+    # the main training loop calls optimizer.step() before scheduler.step().
+    warnings.filterwarnings(
+        "ignore",
+        module=r"torch\.optim\.lr_scheduler",
+        category=UserWarning,
+    )
+
+    use_cuda = (not args.no_cuda) and torch.cuda.is_available()
+    init_distributed_mode(args)
+    is_distributed = getattr(args, "distributed", False)
+    is_main_process = is_main_process_rank()
+    args.global_rank = getattr(args, "rank", 0)
+    args.world_size = get_world_size()
+    args.local_rank = getattr(args, "gpu", 0)
 
     if GPA is None or UPA is None:
         raise ImportError(
             "PerforatedAI is required for this script. Install it from the PerforatedAI source/package used in your environment."
         )
 
+    convert_module_id = _selected_convert_module_id(args)
+    # Historical switch-mode mismatch is only known for classifier_fc conversion in this script.
+    disallowed_module_id = ".classifier_fc" if convert_module_id == ".pre_fc" else None
+    if is_main_process and args.pai_convert_target != "pre_fc":
+        print(
+            "Warning: non-n-1 PAI conversion target selected "
+            f"({args.pai_convert_target}). This mode is less stable in this workflow."
+        )
+
     args.output_dir = os.path.abspath(args.output_dir)
-    os.makedirs(args.output_dir, exist_ok=True)
+    if is_main_process:
+        os.makedirs(args.output_dir, exist_ok=True)
     checkpoint_path = os.path.join(args.output_dir, args.checkpoint_path)
     best_model_path = os.path.join(args.output_dir, args.best_model_path)
 
-    use_cuda = (not args.no_cuda) and torch.cuda.is_available()
     use_mps = (not args.no_mps) and torch.backends.mps.is_available()
 
     torch.manual_seed(args.seed)
 
-    if use_cuda:
+    # For DDP, set device to local rank; for single-GPU or CPU, use standard logic
+    if is_distributed and use_cuda:
+        device = torch.device(f"cuda:{args.local_rank}")
+        torch.cuda.set_device(device)
+    elif use_cuda:
         device = torch.device("cuda")
     elif use_mps:
         device = torch.device("mps")
     else:
         device = torch.device("cpu")
 
-    use_data_parallel = use_cuda and torch.cuda.device_count() > 1
-    if use_data_parallel:
-        print(f"Using DataParallel across {torch.cuda.device_count()} GPUs")
+    if is_main_process:
+        if is_distributed:
+            print(f"Using DistributedDataParallel: rank {args.global_rank}/{args.world_size}, local_rank {args.local_rank}, device {device}")
+            # Account for auto-enabling when dendrite_mode > 0
+            effective_find_unused = args.ddp_find_unused_parameters or (args.dendrite_mode > 0)
+            print(f"DDP find_unused_parameters={effective_find_unused} " + ("(auto-enabled for dendrite mode)" if args.dendrite_mode > 0 and not args.ddp_find_unused_parameters else ""))
+        else:
+            print(f"Single-process mode on device {device}")
+        if args.debug_pai_switch_logs:
+            print("PAI switch debug logs enabled (--debug-pai-switch-logs).")
 
     train_transform, val_transform, test_transform, crop_size = build_transforms()
 
@@ -1071,16 +1506,43 @@ def main() -> None:
 
     num_workers = args.num_workers if args.num_workers >= 0 else 0
 
+    # For distributed training, use DistributedSampler; for single-rank, use standard shuffling
+    train_sampler = DistributedSampler(
+        train_dataset,
+        num_replicas=args.world_size,
+        rank=args.global_rank,
+        shuffle=True,
+        seed=args.seed,
+    ) if is_distributed else None
+
+    val_sampler = DistributedSampler(
+        val_dataset,
+        num_replicas=args.world_size,
+        rank=args.global_rank,
+        shuffle=False,
+        seed=args.seed,
+    ) if is_distributed else None
+
+    test_sampler = DistributedSampler(
+        test_dataset,
+        num_replicas=args.world_size,
+        rank=args.global_rank,
+        shuffle=False,
+        seed=args.seed,
+    ) if is_distributed else None
+
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
         batch_size=args.batch_size,
-        shuffle=True,
+        sampler=train_sampler,
+        shuffle=(train_sampler is None),  # Only shuffle if not using DistributedSampler
         num_workers=num_workers,
         pin_memory=use_cuda,
     )
     val_loader = torch.utils.data.DataLoader(
         val_dataset,
         batch_size=args.test_batch_size,
+        sampler=val_sampler,
         shuffle=False,
         num_workers=num_workers,
         pin_memory=use_cuda,
@@ -1088,6 +1550,7 @@ def main() -> None:
     test_loader = torch.utils.data.DataLoader(
         test_dataset,
         batch_size=args.test_batch_size,
+        sampler=test_sampler,
         shuffle=False,
         num_workers=num_workers,
         pin_memory=use_cuda,
@@ -1096,6 +1559,7 @@ def main() -> None:
     cpu_benchmark_loader = torch.utils.data.DataLoader(
         val_dataset,
         batch_size=1,
+        sampler=val_sampler if is_distributed else None,
         shuffle=False,
         num_workers=num_workers,
         pin_memory=use_cuda,
@@ -1103,6 +1567,7 @@ def main() -> None:
     gpu_benchmark_loader = torch.utils.data.DataLoader(
         val_dataset,
         batch_size=8,
+        sampler=val_sampler if is_distributed else None,
         shuffle=False,
         num_workers=num_workers,
         pin_memory=use_cuda,
@@ -1114,9 +1579,13 @@ def main() -> None:
     )
     model = EfficientNetB5PAI(base_model)
 
-    # Restrict tracked conversions to the layer directly before final FC.
-    
+    # Configure PAI module selection: explicit target, no exclusion lists.
     configure_pai(args)
+    if is_main_process:
+        print(
+            "PAI conversion config: "
+            f"convert_target={_selected_convert_module_id(args)}"
+        )
 
 #     pai_system_name = (
 #     args.perforated_load_path
@@ -1161,9 +1630,17 @@ def main() -> None:
     )
 
     # Start clean on fresh runs so old converted modules do not leak into the next experiment.
-    if not args.perforated_load_path and os.path.exists(pai_system_name):
-        print(f"Removing old PAI directory at {pai_system_name}...")
-        shutil.rmtree(pai_system_name)
+    # In DDP, only rank 0 performs destructive filesystem cleanup.
+    if not args.perforated_load_path:
+        if is_main_process and os.path.exists(pai_system_name):
+            print(f"Removing old PAI directory at {pai_system_name}...")
+            try:
+                shutil.rmtree(pai_system_name)
+            except FileNotFoundError:
+                # Another process or NFS delay may make entries disappear mid-delete.
+                pass
+        if is_distributed:
+            dist.barrier()
 
     # Keep these directories available for tracker CSV export variants.
     # PerforatedAI can build both absolute and cwd-relative variants internally.
@@ -1173,14 +1650,19 @@ def main() -> None:
         os.makedirs(os.path.join(pai_root, args.output_dir), exist_ok=True)
 
     if args.perforated_load_path:
-        model = UPA.initialize_pai(model, save_name=pai_system_name)
+        with suppress_output():
+            model = UPA.initialize_pai(model, save_name=pai_system_name)
         if hasattr(UPA, "load_system"):
             try:
-                model = UPA.load_system(model, pai_system_name, "latest", True)
-            except Exception as exc:
+                with suppress_output():
+                    model = UPA.load_system(model, pai_system_name, "latest", True)
+            except BaseException as exc:
                 print(f"PerforatedAI load_system failed: {exc}. Continuing with initialized model.")
     else:
-        model = UPA.initialize_pai(model, save_name=pai_system_name)
+        with suppress_output():
+            model = UPA.initialize_pai(model, save_name=pai_system_name)
+
+    _assert_disallowed_module_not_converted(model, disallowed_module_id)
 
     print(model.classifier_fc)
 
@@ -1189,19 +1671,37 @@ def main() -> None:
     print(f"Trainable parameters: {trainable_params:,}")
 
     model = model.to(device)
-    parallel_model = nn.DataParallel(model) if use_data_parallel else model
+    model_without_ddp = model
+    optimizer, scheduler = setup_pai_optimizer_scheduler(args, model_without_ddp)
 
-    optimizer, scheduler = setup_pai_optimizer_scheduler(args, model)
+    # Wrap model with DistributedDataParallel if in distributed mode
+    if is_distributed:
+        # When using PAI dendrites, always enable find_unused_parameters because newly added
+        # parameters may not participate in every forward pass during early training.
+        find_unused = args.ddp_find_unused_parameters or (args.dendrite_mode > 0)
+        model = DDP(
+            model,
+            device_ids=[args.gpu],
+            output_device=args.gpu,
+            find_unused_parameters=find_unused,
+            broadcast_buffers=False,
+        )
+        parallel_model = model
+    else:
+        parallel_model = model
 
     running_stats: Dict[str, float] = {}
     best_validation_accuracy = float("-inf")
     best_validation_snapshot: Dict[str, float] = {}
     start_epoch = 1
+    warned_missing_pai_nonmain = False
 
     if args.resume_from_checkpoint and os.path.exists(checkpoint_path):
         try:
             checkpoint = torch.load(checkpoint_path, map_location=device)
-            model.load_state_dict(checkpoint["model_state_dict"])
+            # Handle both wrapped (DDP) and unwrapped model state dicts
+            model_to_load = model.module if isinstance(model, DDP) else model
+            model_to_load.load_state_dict(checkpoint["model_state_dict"])
             optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
             scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
             running_stats = checkpoint.get("running_stats", running_stats)
@@ -1209,11 +1709,15 @@ def main() -> None:
             best_validation_snapshot = checkpoint.get("best_validation_snapshot", best_validation_snapshot)
             loaded_epoch = int(checkpoint.get("epoch", 0))
             start_epoch = loaded_epoch + 1
-            print(f"Resuming from epoch {loaded_epoch}")
+            if is_main_process:
+                print(f"Resuming from epoch {loaded_epoch}")
         except Exception as exc:
-            print(f"Failed to resume from checkpoint at {checkpoint_path}: {exc}")
+            if is_main_process:
+                print(f"Failed to resume from checkpoint at {checkpoint_path}: {exc}")
 
-    run = init_wandb(args)
+    run = init_wandb(args) if is_main_process else None
+    if is_distributed:
+        dist.barrier()  # Synchronize all ranks after setup
     cycle_start = time.perf_counter()
 
 
@@ -1222,23 +1726,183 @@ def main() -> None:
         epoch += 1
         epoch_start = time.perf_counter()
 
-        train_loss, train_accuracy, train_top5_accuracy = train(
-            args, parallel_model, device, train_loader, optimizer, epoch
-        )
-        GPA.pai_tracker.add_extra_score(train_accuracy, "train")
-        GPA.pai_tracker.add_extra_score(train_top5_accuracy, "train_top5")
-        val_metrics, test_metrics = test(parallel_model, device, val_loader, test_loader)
+        if is_distributed and train_sampler is not None:
+            train_sampler.set_epoch(epoch)
 
-        model, restructured, training_complete = GPA.pai_tracker.add_validation_score(
-            val_metrics["accuracy"], model
+        train_loss, train_accuracy, train_top5_accuracy = train(
+            args, parallel_model, device, train_loader, optimizer, epoch, is_main_process=is_main_process
         )
-        model = model.to(device)
-        parallel_model = nn.DataParallel(model) if use_data_parallel else model
+        if is_main_process:
+            GPA.pai_tracker.add_extra_score(train_accuracy, "train")
+            GPA.pai_tracker.add_extra_score(train_top5_accuracy, "train_top5")
+        val_metrics, test_metrics = test(
+            parallel_model,
+            device,
+            val_loader,
+            test_loader,
+            is_main_process=is_main_process,
+        )
+
+        # For DDP, need to pass unwrapped model to PAI; then re-wrap
+        model_for_pai = model.module if isinstance(model, DDP) else model
+        rebuilt_switch_model = False
+        if is_main_process:
+            if not _model_has_pai_modules(model_for_pai):
+                if is_main_process:
+                    print("Detected model without PAI modules before switch logic; rebuilding PAI switch model.")
+                model_for_pai = prepare_pai_switch_model(
+                    model_for_pai,
+                    pai_system_name,
+                    args.finetune_backbone,
+                    disallowed_module_id=disallowed_module_id,
+                )
+                rebuilt_switch_model = True
+            _assert_disallowed_module_not_converted(model_for_pai, disallowed_module_id)
+            # Rebind optimizer/scheduler only if we had to rebuild the wrapped model.
+            if rebuilt_switch_model:
+                optimizer, scheduler = setup_pai_optimizer_scheduler(args, model_for_pai)
+        elif not _model_has_pai_modules(model_for_pai):
+            # Non-main ranks do not run switch logic; avoid repeated recovery/load attempts
+            # here because they can emit noisy false-positive load_system warnings.
+            if not warned_missing_pai_nonmain:
+                print(
+                    "Non-main rank detected model without explicit PAI markers; "
+                    "deferring recovery to rank-synchronized restructure path."
+                )
+                warned_missing_pai_nonmain = True
+
+        # Seed switch-mode files once on rank 0, then synchronize ranks.
+        ensure_pai_switch_files_exist(
+            pai_system_name,
+            model_for_pai,
+            is_distributed=is_distributed,
+            is_main_process=is_main_process,
+        )
+        restructured = False
+        training_complete = False
+        pai_switch_error = False
+        if is_main_process:
+            try:
+                with warnings.catch_warnings():
+                    warnings.filterwarnings(
+                        "ignore",
+                        message="No artists with labels found to put in legend.*",
+                        category=UserWarning,
+                    )
+                    model_for_pai, restructured, training_complete = _call_pai_add_validation_score(
+                        args,
+                        float(val_metrics["accuracy"]),
+                        model_for_pai,
+                    )
+            except SystemExit as exc:
+                if _is_nonfatal_pai_system_exit(exc):
+                    print(
+                        "PAI add_validation_score returned non-fatal SystemExit "
+                        f"(code={exc.code!r}); continuing without restructure this epoch."
+                    )
+                else:
+                    raise
+            except Exception as exc:
+                print(f"PAI add_validation_score failed once: {exc}. Attempting recovery and single retry.")
+                try:
+                    model_for_pai = recover_pai_model_if_needed(model_for_pai, pai_system_name)
+                    with warnings.catch_warnings():
+                        warnings.filterwarnings(
+                            "ignore",
+                            message="No artists with labels found to put in legend.*",
+                            category=UserWarning,
+                        )
+                        model_for_pai, restructured, training_complete = _call_pai_add_validation_score(
+                            args,
+                            float(val_metrics["accuracy"]),
+                            model_for_pai,
+                        )
+                    print("PAI add_validation_score retry succeeded after recovery.")
+                except SystemExit as retry_exc:
+                    if _is_nonfatal_pai_system_exit(retry_exc):
+                        print(
+                            "PAI add_validation_score retry returned non-fatal SystemExit "
+                            f"(code={retry_exc.code!r}); continuing without restructure this epoch."
+                        )
+                    else:
+                        raise
+                except Exception as retry_exc:
+                    pai_switch_error = True
+                    training_complete = True
+                    print(
+                        "PAI add_validation_score retry failed; "
+                        f"ending training cleanly to avoid DDP rank desync: {retry_exc}"
+                    )
+
+        if is_distributed:
+            # Ensure main rank's PAI switch is fully persisted before non-main ranks try to load.
+            dist.barrier()
+            
+            control = [bool(restructured), bool(training_complete), bool(pai_switch_error)]
+            dist.broadcast_object_list(control, src=0)
+            restructured = bool(control[0])
+            training_complete = bool(control[1])
+            pai_switch_error = bool(control[2])
+            if restructured and hasattr(UPA, "load_system"):
+                dist.barrier()  # Wait for main rank's save to persist
+                latest_path = os.path.join(os.path.abspath(os.path.normpath(pai_system_name)), "latest.pt")
+                if not _model_has_pai_modules(model_for_pai):
+                    with suppress_output():
+                        model_for_pai = UPA.initialize_pai(model_for_pai, save_name=pai_system_name)
+                # Retry with NFS latency tolerance
+                for attempt in range(5):
+                    if os.path.exists(latest_path):
+                        break
+                    if attempt < 4:
+                        time.sleep(0.1)
+                
+                if os.path.exists(latest_path):
+                    try:
+                        with suppress_output():
+                            model_for_pai = UPA.load_system(model_for_pai, pai_system_name, "latest", True)
+                        if is_main_process:
+                            print(f"All ranks reloaded restructured model from {latest_path}")
+                    except Exception as exc:
+                        if is_main_process:
+                            print(f"Warning: failed to load restructured model: {exc}")
+            if pai_switch_error and not is_main_process:
+                print("Rank 0 reported PAI switch failure; ending training cleanly on this rank.")
+
+        model_for_pai = model_for_pai.to(device)
 
         if restructured:
-            optimizer, scheduler = setup_pai_optimizer_scheduler(args, model)
+            # Ensure all ranks have synchronized their model state before re-wrapping with DDP.
+            if is_distributed:
+                dist.barrier()
+            
+            # Rebuild DDP wrapper only when model structure changes.
+            optimizer, scheduler = setup_pai_optimizer_scheduler(args, model_for_pai)
+            if is_distributed:
+                # When using PAI dendrites, always enable find_unused_parameters because newly added
+                # parameters may not participate in every forward pass during early training.
+                find_unused = args.ddp_find_unused_parameters or (args.dendrite_mode > 0)
+                model = DDP(
+                    model_for_pai,
+                    device_ids=[args.gpu],
+                    output_device=args.gpu,
+                    find_unused_parameters=find_unused,
+                    broadcast_buffers=False,
+                )
+            else:
+                model = model_for_pai
+            parallel_model = model
         else:
-            scheduler.step()
+            # Keep existing wrapper to avoid rank desync on PAI internal variable-size buffers.
+            if not is_distributed:
+                model = model_for_pai
+                parallel_model = model
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message=r"Detected call of `lr_scheduler\\.step\\(\\)` before `optimizer\\.step\\(\\)`.*",
+                    category=UserWarning,
+                )
+                scheduler.step()
 
         seconds_per_training_epoch = time.perf_counter() - epoch_start
         seconds_per_training_cycle = time.perf_counter() - cycle_start
@@ -1261,10 +1925,19 @@ def main() -> None:
                 "validation_top5_at_best_validation": validation_top5,
                 "epoch_at_best_validation": epoch,
             }
-            try:
-                torch.save(_state_dict_without_pai_metadata(model), best_model_path)
-            except Exception as exc:
-                print(f"Failed to save best model to {best_model_path}: {exc}")
+            if is_main_process:
+                try:
+                    # Unwrap model if DDP before saving
+                    model_to_save = model.module if isinstance(model, DDP) else model
+                    save_on_master(
+                        _state_dict_without_pai_metadata(
+                            model_to_save,
+                            disallowed_module_id=disallowed_module_id,
+                        ),
+                        best_model_path,
+                    )
+                except Exception as exc:
+                    print(f"Failed to save best model to {best_model_path}: {exc}")
 
         epoch_log: Dict[str, Optional[float]] = {
             "epoch": epoch,
@@ -1306,98 +1979,126 @@ def main() -> None:
             ]
             epoch_log["flowers/epoch_at_best_validation"] = best_validation_snapshot["epoch_at_best_validation"]
 
-        print(f"Epoch {epoch} metrics: {epoch_log}")
+        if is_main_process:
+            print(f"Epoch {epoch} metrics: {epoch_log}")
         if run is not None:
             log_to_wandb(run, epoch_log, step=epoch)
 
-        checkpoint = {
-            "epoch": epoch,
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "scheduler_state_dict": scheduler.state_dict(),
-            "running_stats": running_stats,
-            "best_validation_accuracy": best_validation_accuracy,
-            "best_validation_snapshot": best_validation_snapshot,
-            "finetune_backbone": args.finetune_backbone,
-        }
-        try:
-            torch.save(checkpoint, checkpoint_path)
-        except Exception as exc:
-            print(f"Failed to save checkpoint to {checkpoint_path}: {exc}")
+        # Always save checkpoint from main process; extract unwrapped state dict for DDP
+        if is_main_process:
+            checkpoint_model_state = model.module.state_dict() if isinstance(model, DDP) else model.state_dict()
+            checkpoint = {
+                "epoch": epoch,
+                "model_state_dict": checkpoint_model_state,
+                "optimizer_state_dict": optimizer.state_dict(),
+                "scheduler_state_dict": scheduler.state_dict(),
+                "running_stats": running_stats,
+                "best_validation_accuracy": best_validation_accuracy,
+                "best_validation_snapshot": best_validation_snapshot,
+                "finetune_backbone": args.finetune_backbone,
+            }
+            try:
+                save_on_master(checkpoint, checkpoint_path)
+            except Exception as exc:
+                print(f"Failed to save checkpoint to {checkpoint_path}: {exc}")
 
         if training_complete:
-            print("PerforatedAI signaled training complete.")
+            if is_main_process:
+                print("PerforatedAI signaled training complete.")
             break
 
         if args.epochs > 0 and epoch >= args.epochs:
-            print(f"Reached --epochs {args.epochs} safety cap.")
+            if is_main_process:
+                print(f"Reached --epochs {args.epochs} safety cap.")
             break
-    model.eval()
 
-    if os.path.exists(best_model_path):
-        try:
-            _load_state_dict_compatible(model, best_model_path, device)
-            model.to(device)
-            print(f"Loaded best validation checkpoint from {best_model_path} for final test evaluation.")
-        except Exception as exc:
-            print(f"Failed to load best model from {best_model_path}: {exc}")
+    if is_distributed:
+        dist.barrier()
 
-    gpu_inference_ips = float("nan")
-    if torch.cuda.is_available() and not args.no_cuda:
-        gpu_inference_ips = benchmark_inference_throughput(
-            model, gpu_benchmark_loader, torch.device("cuda")
+    # Unwrap model before final evaluation if using DDP
+    if isinstance(model, DDP):
+        model = model.module
+    final_metrics: Dict[str, object] = {}
+    if is_main_process:
+        model.eval()
+
+        if os.path.exists(best_model_path):
+            try:
+                _load_state_dict_compatible(
+                    model,
+                    best_model_path,
+                    device,
+                    disallowed_module_id=disallowed_module_id,
+                )
+                model.to(device)
+                print(f"Loaded best validation checkpoint from {best_model_path} for final test evaluation.")
+            except Exception as exc:
+                print(f"Failed to load best model from {best_model_path}: {exc}")
+
+        gpu_inference_ips = float("nan")
+        if torch.cuda.is_available() and not args.no_cuda:
+            gpu_inference_ips = benchmark_inference_throughput(
+                model, gpu_benchmark_loader, torch.device("cuda")
+            )
+
+        model_cpu = model.to(torch.device("cpu"))
+        cpu_inference_ips = benchmark_inference_throughput(
+            model_cpu, cpu_benchmark_loader, torch.device("cpu")
         )
+        latency_ms = benchmark_cpu_latency_single_core_ms(model_cpu, cpu_benchmark_loader)
+        param_count, flops, flops_source = compute_model_stats(model_cpu, torch.device("cpu"), crop_size)
 
-    model_cpu = model.to(torch.device("cpu"))
-    cpu_inference_ips = benchmark_inference_throughput(
-        model_cpu, cpu_benchmark_loader, torch.device("cpu")
-    )
-    latency_ms = benchmark_cpu_latency_single_core_ms(model_cpu, cpu_benchmark_loader)
-    param_count, flops, flops_source = compute_model_stats(model_cpu, torch.device("cpu"), crop_size)
+        final_metrics = {
+            "flowers/gpu_inference_inputs_per_second": safe_number(gpu_inference_ips),
+            "flowers/cpu_inference_inputs_per_second": safe_number(cpu_inference_ips),
+            "efficientnet_b5/num_parameters": param_count,
+            "efficientnet_b5/flops": safe_number(flops),
+            "efficientnet_b5/flops_source": flops_source,
+            "efficientnet_b5/latency_ms_per_batch": safe_number(latency_ms),
+        }
 
-    final_metrics: Dict[str, object] = {
-        "flowers/gpu_inference_inputs_per_second": safe_number(gpu_inference_ips),
-        "flowers/cpu_inference_inputs_per_second": safe_number(cpu_inference_ips),
-        "efficientnet_b5/num_parameters": param_count,
-        "efficientnet_b5/flops": safe_number(flops),
-        "efficientnet_b5/flops_source": flops_source,
-        "efficientnet_b5/latency_ms_per_batch": safe_number(latency_ms),
-    }
+        if best_validation_snapshot:
+            final_metrics["efficientnet_b5/accuracy_at_best_validation"] = best_validation_snapshot[
+                "test_accuracy_at_best_validation"
+            ]
+            final_metrics["flowers/test_top5_at_best_validation"] = best_validation_snapshot[
+                "test_top5_at_best_validation"
+            ]
+            final_metrics["flowers/validation_accuracy_best"] = best_validation_snapshot[
+                "validation_accuracy_best"
+            ]
+            final_metrics["flowers/validation_top5_at_best_validation"] = best_validation_snapshot[
+                "validation_top5_at_best_validation"
+            ]
+            final_metrics["flowers/epoch_at_best_validation"] = best_validation_snapshot[
+                "epoch_at_best_validation"
+            ]
 
-    if best_validation_snapshot:
-        final_metrics["efficientnet_b5/accuracy_at_best_validation"] = best_validation_snapshot[
-            "test_accuracy_at_best_validation"
-        ]
-        final_metrics["flowers/test_top5_at_best_validation"] = best_validation_snapshot[
-            "test_top5_at_best_validation"
-        ]
-        final_metrics["flowers/validation_accuracy_best"] = best_validation_snapshot[
-            "validation_accuracy_best"
-        ]
-        final_metrics["flowers/validation_top5_at_best_validation"] = best_validation_snapshot[
-            "validation_top5_at_best_validation"
-        ]
-        final_metrics["flowers/epoch_at_best_validation"] = best_validation_snapshot[
-            "epoch_at_best_validation"
-        ]
+        print(f"Final performance metrics: {final_metrics}")
 
-    print(f"Final performance metrics: {final_metrics}")
-
-    pai_png_path = ensure_pai_png(args.output_dir, model, pai_system_name)
-    print(f"PAI graph image written to: {pai_png_path}")
-    if run is not None and os.path.exists(pai_png_path):
-        try:
-            run.save(os.path.basename(pai_png_path), base_path=args.output_dir, policy="now")
-        except Exception as exc:
-            print(f"W&B PAI.png upload failed: {exc}")
+        pai_png_path = ensure_pai_png(args.output_dir, model, pai_system_name)
+        print(f"PAI graph image written to: {pai_png_path}")
+        if run is not None and os.path.exists(pai_png_path):
+            try:
+                run.log({"perforatedai/pai_graph": wandb.Image(pai_png_path)})
+            except Exception as exc:
+                print(f"W&B PAI.png upload failed: {exc}")
 
     if run is not None:
         log_to_wandb(run, final_metrics)
         finish_wandb(run)
 
-    if args.save_model:
-        torch.save(model.state_dict(), os.path.join(args.output_dir, "efficientnet_b5_flowers102_baseline.pt"))
+    if args.save_model and is_main_process:
+        save_on_master(model.state_dict(), os.path.join(args.output_dir, "efficientnet_b5_flowers102_baseline.pt"))
+    
+    # Clean up distributed training
+    if is_distributed:
+        dist.barrier()
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass
