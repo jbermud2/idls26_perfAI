@@ -1924,14 +1924,20 @@ def main() -> None:
                 except Exception as exc:
                     print(f"Failed to save best model to {best_model_path}: {exc}")
 
+        # Count parameters (important for PAI since params change when dendrites are added)
+        model_for_count = model.module if isinstance(model, DDP) else model
+        total_params, trainable_params = count_parameters(model_for_count)
+
         epoch_log: Dict[str, Optional[float]] = {
             "epoch": epoch,
-            "perforatedai/train_accuracy": train_accuracy,
-            "perforatedai/train_top5_accuracy": train_top5_accuracy,
-            "perforatedai/validation_accuracy": validation_accuracy,
+            # Model parameter counts (tracked per epoch for PAI)
+            "model/num_parameters": total_params,
+            "model/trainable_parameters": trainable_params,
+            # Training metrics
             "flowers/train_loss": train_loss,
             "flowers/train_accuracy": train_accuracy,
             "flowers/train_top5_accuracy": train_top5_accuracy,
+            # Validation metrics
             "flowers/validation_loss": val_metrics["loss"],
             "flowers/validation_accuracy": validation_accuracy,
             "flowers/validation_accuracy_min": running_stats.get("validation_accuracy_min"),
@@ -1939,6 +1945,7 @@ def main() -> None:
             "flowers/validation_top5_accuracy": validation_top5,
             "flowers/validation_top5_min": running_stats.get("validation_top5_min"),
             "flowers/validation_top5_max": running_stats.get("validation_top5_max"),
+            # Test metrics
             "flowers/test_loss": test_metrics["loss"],
             "flowers/test_accuracy": test_metrics["accuracy"],
             "flowers/test_accuracy_min": running_stats.get("test_accuracy_min"),
@@ -1946,7 +1953,7 @@ def main() -> None:
             "flowers/test_top5_accuracy": test_metrics["accuracy_top5"],
             "flowers/test_top5_min": running_stats.get("test_top5_min"),
             "flowers/test_top5_max": running_stats.get("test_top5_max"),
-            "flowers/precision_at_1": test_metrics["precision_at_1"],
+            # Timing and learning rate
             "flowers/seconds_per_training_epoch": seconds_per_training_epoch,
             "flowers/seconds_per_training_cycle": seconds_per_training_cycle,
             "flowers/learning_rate": optimizer.param_groups[0]["lr"],
@@ -2041,27 +2048,18 @@ def main() -> None:
         final_metrics = {
             "flowers/gpu_inference_inputs_per_second": safe_number(gpu_inference_ips),
             "flowers/cpu_inference_inputs_per_second": safe_number(cpu_inference_ips),
-            "efficientnet_b5/num_parameters": param_count,
-            "efficientnet_b5/flops": safe_number(flops),
-            "efficientnet_b5/flops_source": flops_source,
-            "efficientnet_b5/latency_ms_per_batch": safe_number(latency_ms),
+            "model/final_num_parameters": param_count,
+            "model/flops": safe_number(flops),
+            "model/flops_source": flops_source,
+            "model/latency_ms_per_batch": safe_number(latency_ms),
         }
 
         if best_validation_snapshot:
-            final_metrics["efficientnet_b5/accuracy_at_best_validation"] = best_validation_snapshot[
-                "test_accuracy_at_best_validation"
-            ]
-            final_metrics["flowers/test_top5_at_best_validation"] = best_validation_snapshot[
-                "test_top5_at_best_validation"
-            ]
             final_metrics["flowers/validation_accuracy_best"] = best_validation_snapshot[
                 "validation_accuracy_best"
             ]
             final_metrics["flowers/validation_top5_at_best_validation"] = best_validation_snapshot[
                 "validation_top5_at_best_validation"
-            ]
-            final_metrics["flowers/epoch_at_best_validation"] = best_validation_snapshot[
-                "epoch_at_best_validation"
             ]
 
         print(f"Final performance metrics: {final_metrics}")
