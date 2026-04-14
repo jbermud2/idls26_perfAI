@@ -163,63 +163,71 @@ def _selected_convert_module_id(args) -> str:
     return ".classifier_fc" if args.pai_convert_target == "classifier_fc" else ".pre_fc"
 
 
-def configure_pai(args) -> None:
+def configure_pai(args, model: Optional[nn.Module] = None) -> None:
+    """Configure PerforatedAI global parameters.
+
+    Uses Rorry's pattern from trainers/train_perforated_resnet.py:
+    - append_module_ids_to_track() to tell PAI to SKIP every frozen / non-target module
+    - append_module_names_to_convert(["Linear"]) to restrict dendrite type to Linear only
+    - Only .pre_fc (or .classifier_fc) remains as the live conversion target
+
+    PAI diagnostic #6 fires when a frozen module is converted but never received gradients.
+    Registering all frozen module IDs as "tracked" (i.e. skipped) before initialize_pai
+    prevents PAI from wrapping them and eliminates the mode-switch crash.
+    """
     GPA.pc.set_testing_dendrite_capacity(False)
-    # Reset all selector lists so behavior is deterministic across fresh processes,
-    # torchrun workers, and prior interactive sessions.
-    for setter_name in [
-        "set_module_ids_to_track",
-        "set_module_ids_to_convert",
-        "set_module_names_to_track",
-        "set_module_names_to_convert",
-        "set_modules_to_track",
-        "set_modules_to_convert",
-    ]:
-        if hasattr(GPA.pc, setter_name):
-            try:
-                getattr(GPA.pc, setter_name)([])
-            except Exception:
-                pass
 
-    # EXPLICIT approach: Only specify what to convert, rely on PAI defaults for rest.
-    # This is more robust than exclusion lists which may have version-dependent semantics.
-    convert_module_id = _selected_convert_module_id(args)
+    # --- Restrict dendrite type to Linear layers only (mirrors Rorry's BasicBlock/Bottleneck list) ---
+    GPA.pc.append_module_names_to_convert(["Linear"])
 
-    # Clear any tracking filters first—we only want to convert one specific module.
-    if hasattr(GPA.pc, "set_module_ids_to_track"):
-        try:
-            GPA.pc.set_module_ids_to_track([])
-        except Exception:
-            pass
+    # --- Mark every frozen / non-target module so PAI skips it entirely ---
+    # EfficientNetB5PAI layout:
+    #   .features.*          – frozen backbone (196 sub-modules)
+    #   .avgpool             – pooling, no grads
+    #   .pre_fc              – ← ONLY dendrite target
+    #   .classifier_dropout  – dropout, skip
+    #   .classifier_fc       – final classifier, skip (unless pai_convert_target == classifier_fc)
+    convert_target = _selected_convert_module_id(args)  # ".pre_fc" or ".classifier_fc"
 
-    # Explicitly set ONLY the target module for conversion.
-    if hasattr(GPA.pc, "set_module_ids_to_convert"):
-        GPA.pc.set_module_ids_to_convert([convert_module_id])
-    else:
-        # Fallback for older PAI versions
-        try:
-            GPA.pc.module_ids_to_convert = [convert_module_id]
-        except Exception:
-            pass
-    # Keep PAI internals quiet during regular training runs.
-    GPA.pc.set_verbose(False)
+    frozen_top_level = [".avgpool", ".classifier_dropout", ".classifier_fc"]
+    if convert_target == ".classifier_fc":
+        # If user chose classifier_fc as target, keep pre_fc frozen instead
+        frozen_top_level = [".avgpool", ".classifier_dropout", ".pre_fc"]
 
-    # Helpful runtime visibility only when strict debug checks are enabled.
-    if args.strict_unwrapped_check or args.strict_weight_decay_check:
-        try:
-            print("PAI selectors:")
-            if hasattr(GPA.pc, "get_module_ids_to_track"):
-                print("  module_ids_to_track:", GPA.pc.get_module_ids_to_track())
-            if hasattr(GPA.pc, "get_module_ids_to_convert"):
-                print("  module_ids_to_convert:", GPA.pc.get_module_ids_to_convert())
-            if hasattr(GPA.pc, "get_module_names_to_convert"):
-                print("  module_names_to_convert:", GPA.pc.get_module_names_to_convert())
-        except Exception:
-            pass
+    # Always exclude top-level .features block
+    frozen_ids = [".features"] + frozen_top_level
+
+    # If the model is provided, also enumerate every named sub-module under .features
+    # so PAI cannot slip through any child that isn't covered by the parent prefix.
+    if model is not None:
+        model_for_enum = model.module if isinstance(model, DDP) else model
+        for name, _ in model_for_enum.named_modules():
+            if name == "":
+                continue
+            if name.startswith("features") or name in (
+                "avgpool", "classifier_dropout", "classifier_fc",
+                "pre_fc" if convert_target != ".pre_fc" else "__skip__",
+            ):
+                dot_name = "." + name
+                if dot_name not in frozen_ids:
+                    frozen_ids.append(dot_name)
+
+    GPA.pc.append_module_ids_to_track(frozen_ids)
+
+    # Verbose is left ON so PAI diagnostic messages appear in the log (helps debug).
+    GPA.pc.set_verbose(True)
 
     # Avoid interactive pdb stop on weight-decay warnings in non-interactive runs.
     if hasattr(GPA.pc, "set_weight_decay_accepted") and not args.strict_weight_decay_check:
         GPA.pc.set_weight_decay_accepted(True)
+
+    # Avoid interactive pdb stop on "unwrapped modules" in non-interactive runs.
+    if hasattr(GPA.pc, "set_unwrapped_modules_confirmed") and not args.strict_unwrapped_check:
+        GPA.pc.set_unwrapped_modules_confirmed(True)
+
+    print(f"PAI: dendrite target = {convert_target}")
+    print(f"PAI: frozen/skipped module IDs registered ({len(frozen_ids)}): {frozen_ids[:8]}{'...' if len(frozen_ids) > 8 else ''}")
+    print(f"PAI: module_names_to_convert = ['Linear']")
 
     # threshold presets when integer presets are provided.
     if float(args.improvement_threshold).is_integer():
@@ -237,10 +245,6 @@ def configure_pai(args) -> None:
     GPA.pc.set_improvement_threshold(threshold)
 
     GPA.pc.set_candidate_weight_initialization_multiplier(args.candidate_weight_init_mult)
-
-    # Avoid interactive pdb stop on "unwrapped modules" in non-interactive runs.
-    if hasattr(GPA.pc, "set_unwrapped_modules_confirmed") and not args.strict_unwrapped_check:
-        GPA.pc.set_unwrapped_modules_confirmed(True)
 
     pai_forward_function = getattr(torch, args.pai_forward_function)
     GPA.pc.set_pai_forward_function(pai_forward_function)
@@ -940,11 +944,8 @@ def _is_nonfatal_pai_system_exit(exc: BaseException) -> bool:
 
 
 def _call_pai_add_validation_score(args, validation_accuracy: float, model: nn.Module):
-    """Call PAI validation score hook with optional debug logging enabled."""
-    if args.debug_pai_switch_logs:
-        return GPA.pai_tracker.add_validation_score(validation_accuracy, model)
-    with suppress_output():
-        return GPA.pai_tracker.add_validation_score(validation_accuracy, model)
+    """Call PAI validation score hook.  Always visible so PAI diagnostics reach the log."""
+    return GPA.pai_tracker.add_validation_score(validation_accuracy, model)
 
 
 def recover_pai_model_if_needed(model: nn.Module, pai_system_name: str) -> nn.Module:
@@ -952,13 +953,11 @@ def recover_pai_model_if_needed(model: nn.Module, pai_system_name: str) -> nn.Mo
     if _model_has_pai_modules(model):
         return model
 
-    with suppress_output():
-        model = UPA.initialize_pai(model, save_name=pai_system_name)
+    model = UPA.initialize_pai(model, save_name=pai_system_name)
     latest_path = os.path.join(os.path.abspath(os.path.normpath(pai_system_name)), "latest.pt")
     if hasattr(UPA, "load_system") and os.path.exists(latest_path):
         try:
-            with suppress_output():
-                model = UPA.load_system(model, pai_system_name, "latest", True)
+            model = UPA.load_system(model, pai_system_name, "latest", True)
         except BaseException as exc:
             print(f"PAI recovery load_system failed: {exc}. Continuing with initialized model.")
     return model
@@ -981,13 +980,11 @@ def prepare_pai_switch_model(
     fresh_model = EfficientNetB5PAI(fresh_base_model)
     _load_state_dict_into_model(fresh_model, source_state_dict, disallowed_module_id=disallowed_module_id)
 
-    with suppress_output():
-        fresh_model = UPA.initialize_pai(fresh_model, save_name=pai_system_name)
+    fresh_model = UPA.initialize_pai(fresh_model, save_name=pai_system_name)
     latest_path = os.path.join(os.path.abspath(os.path.normpath(pai_system_name)), "latest.pt")
     if hasattr(UPA, "load_system") and os.path.exists(latest_path):
         try:
-            with suppress_output():
-                fresh_model = UPA.load_system(fresh_model, pai_system_name, "latest", True)
+            fresh_model = UPA.load_system(fresh_model, pai_system_name, "latest", True)
         except BaseException as exc:
             print(f"PAI switch model load of latest failed: {exc}. Continuing with freshly initialized model.")
     return fresh_model
@@ -1579,13 +1576,8 @@ def main() -> None:
     )
     model = EfficientNetB5PAI(base_model)
 
-    # Configure PAI module selection: explicit target, no exclusion lists.
-    configure_pai(args)
-    if is_main_process:
-        print(
-            "PAI conversion config: "
-            f"convert_target={_selected_convert_module_id(args)}"
-        )
+    # Configure PAI module selection: mark frozen modules to skip, restrict to Linear dendrites.
+    configure_pai(args, model=model)
 
 #     pai_system_name = (
 #     args.perforated_load_path
@@ -1650,17 +1642,14 @@ def main() -> None:
         os.makedirs(os.path.join(pai_root, args.output_dir), exist_ok=True)
 
     if args.perforated_load_path:
-        with suppress_output():
-            model = UPA.initialize_pai(model, save_name=pai_system_name)
+        model = UPA.initialize_pai(model, save_name=pai_system_name)
         if hasattr(UPA, "load_system"):
             try:
-                with suppress_output():
-                    model = UPA.load_system(model, pai_system_name, "latest", True)
+                model = UPA.load_system(model, pai_system_name, "latest", True)
             except BaseException as exc:
                 print(f"PerforatedAI load_system failed: {exc}. Continuing with initialized model.")
     else:
-        with suppress_output():
-            model = UPA.initialize_pai(model, save_name=pai_system_name)
+        model = UPA.initialize_pai(model, save_name=pai_system_name)
 
     _assert_disallowed_module_not_converted(model, disallowed_module_id)
 
@@ -1847,8 +1836,7 @@ def main() -> None:
                 dist.barrier()  # Wait for main rank's save to persist
                 latest_path = os.path.join(os.path.abspath(os.path.normpath(pai_system_name)), "latest.pt")
                 if not _model_has_pai_modules(model_for_pai):
-                    with suppress_output():
-                        model_for_pai = UPA.initialize_pai(model_for_pai, save_name=pai_system_name)
+                    model_for_pai = UPA.initialize_pai(model_for_pai, save_name=pai_system_name)
                 # Retry with NFS latency tolerance
                 for attempt in range(5):
                     if os.path.exists(latest_path):
@@ -1858,8 +1846,7 @@ def main() -> None:
                 
                 if os.path.exists(latest_path):
                     try:
-                        with suppress_output():
-                            model_for_pai = UPA.load_system(model_for_pai, pai_system_name, "latest", True)
+                        model_for_pai = UPA.load_system(model_for_pai, pai_system_name, "latest", True)
                         if is_main_process:
                             print(f"All ranks reloaded restructured model from {latest_path}")
                     except Exception as exc:
