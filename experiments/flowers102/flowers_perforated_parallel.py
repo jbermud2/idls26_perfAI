@@ -163,33 +163,60 @@ def _selected_convert_module_id(args) -> str:
     return ".classifier_fc" if args.pai_convert_target == "classifier_fc" else ".pre_fc"
 
 
-def configure_pai(args, model: Optional[nn.Module] = None) -> None:
+def configure_pai(args) -> None:
     """Configure PerforatedAI global parameters.
 
-    Strategy: Use set_module_ids_to_convert to REPLACE (not append) the conversion list.
-    This ensures PAI converts ONLY the specified module and nothing else.
+    Matches teammate's working PSC code: reset ALL 6 selector lists to empty first,
+    then set only the specific convert target. Per Rorry's advice, use set_silent(True)
+    instead of set_verbose(False) to reduce noise while keeping important messages.
     """
     GPA.pc.set_testing_dendrite_capacity(False)
 
-    convert_target = _selected_convert_module_id(args)  # ".pre_fc" or ".classifier_fc"
+    # Reset ALL selector lists so behavior is deterministic across fresh processes,
+    # torchrun workers, and prior interactive sessions. This is critical for PAI
+    # to work correctly — without this full reset, PAI may convert unexpected modules.
+    for setter_name in [
+        "set_module_ids_to_track",
+        "set_module_ids_to_convert",
+        "set_module_names_to_track",
+        "set_module_names_to_convert",
+        "set_modules_to_track",
+        "set_modules_to_convert",
+    ]:
+        if hasattr(GPA.pc, setter_name):
+            try:
+                getattr(GPA.pc, setter_name)([])
+            except Exception:
+                pass
 
-    # REPLACE the conversion list entirely — only convert this specific module ID
-    # Using set_ instead of append_ to avoid PAI's default "convert everything" behavior
+    # Set ONLY the target module for conversion (explicit approach from working code)
+    convert_module_id = _selected_convert_module_id(args)
     if hasattr(GPA.pc, "set_module_ids_to_convert"):
-        GPA.pc.set_module_ids_to_convert([convert_target])
+        GPA.pc.set_module_ids_to_convert([convert_module_id])
     else:
-        # Fallback: try to clear and then append
         try:
-            GPA.pc.module_ids_to_convert = [convert_target]
-        except AttributeError:
-            GPA.pc.append_module_ids_to_convert([convert_target])
+            GPA.pc.module_ids_to_convert = [convert_module_id]
+        except Exception:
+            pass
 
-    # Also explicitly set module_names_to_convert to empty to prevent type-based conversion
-    if hasattr(GPA.pc, "set_module_names_to_convert"):
-        GPA.pc.set_module_names_to_convert([])
+    # Per Rorry: use set_silent(True) to reduce noise but keep important messages.
+    # This is preferred over set_verbose(False) which hides too much.
+    GPA.pc.set_verbose(False)
+    if hasattr(GPA.pc, "set_silent"):
+        GPA.pc.set_silent(True)
 
-    # Verbose is left ON so PAI diagnostic messages appear in the log (helps debug).
-    GPA.pc.set_verbose(True)
+    # Helpful runtime visibility only when strict debug checks are enabled.
+    if args.strict_unwrapped_check or args.strict_weight_decay_check:
+        try:
+            print("PAI selectors:")
+            if hasattr(GPA.pc, "get_module_ids_to_track"):
+                print("  module_ids_to_track:", GPA.pc.get_module_ids_to_track())
+            if hasattr(GPA.pc, "get_module_ids_to_convert"):
+                print("  module_ids_to_convert:", GPA.pc.get_module_ids_to_convert())
+            if hasattr(GPA.pc, "get_module_names_to_convert"):
+                print("  module_names_to_convert:", GPA.pc.get_module_names_to_convert())
+        except Exception:
+            pass
 
     # Avoid interactive pdb stop on weight-decay warnings in non-interactive runs.
     if hasattr(GPA.pc, "set_weight_decay_accepted") and not args.strict_weight_decay_check:
@@ -198,9 +225,6 @@ def configure_pai(args, model: Optional[nn.Module] = None) -> None:
     # Avoid interactive pdb stop on "unwrapped modules" in non-interactive runs.
     if hasattr(GPA.pc, "set_unwrapped_modules_confirmed") and not args.strict_unwrapped_check:
         GPA.pc.set_unwrapped_modules_confirmed(True)
-
-    print(f"PAI: set_module_ids_to_convert = ['{convert_target}']")
-    print(f"PAI: set_module_names_to_convert = [] (disabled type-based conversion)")
 
     # threshold presets when integer presets are provided.
     if float(args.improvement_threshold).is_integer():
@@ -315,8 +339,7 @@ def ensure_pai_png(output_dir: str, model: nn.Module, save_name: str = "PAI") ->
             (model, resolved_save_name),
         ]:
             try:
-                with suppress_output():
-                    UPA.save_system(*call_args)
+                UPA.save_system(*call_args)
                 break
             except Exception as exc:
                 save_errors.append(f"save_system{call_args[1:]} -> {exc}")
@@ -354,11 +377,9 @@ def ensure_pai_switch_files_exist(
     # Own file creation on rank 0 to avoid races/no-op saves on non-owner ranks.
     if is_main_process:
         if not os.path.exists(latest_path) and hasattr(UPA, "save_system"):
-            with suppress_output():
-                UPA.save_system(model, pai_root, "latest")
+            UPA.save_system(model, pai_root, "latest")
         if not os.path.exists(best_model_path) and hasattr(UPA, "save_system"):
-            with suppress_output():
-                UPA.save_system(model, pai_root, "best_model")
+            UPA.save_system(model, pai_root, "best_model")
 
         # Fallback for environments that only produced latest.
         if not os.path.exists(best_model_path) and os.path.exists(latest_path):
@@ -1551,8 +1572,10 @@ def main() -> None:
     )
     model = EfficientNetB5PAI(base_model)
 
-    # Configure PAI module selection: mark frozen modules to skip, restrict to Linear dendrites.
-    configure_pai(args, model=model)
+    # Configure PAI module selection: explicit target, full reset of all selector lists.
+    configure_pai(args)
+    if is_main_process:
+        print(f"PAI conversion config: convert_target={_selected_convert_module_id(args)}")
 
 #     pai_system_name = (
 #     args.perforated_load_path
@@ -1930,7 +1953,12 @@ def main() -> None:
         }
 
         if hasattr(GPA, "pai_tracker"):
-            epoch_log["perforatedai/dendrite_count"] = GPA.pai_tracker.member_vars.get("num_dendrites_added", 0)
+            # Try tracker first, but also count from state_dict as fallback
+            # (tracker can reset to 0 across reloads but state_dict has the truth)
+            tracker_count = GPA.pai_tracker.member_vars.get("num_dendrites_added", 0) or 0
+            model_for_count = model.module if isinstance(model, DDP) else model
+            state_count = sum(1 for k in model_for_count.state_dict().keys() if ".dendrite_module." in k and ".weight" in k)
+            epoch_log["perforatedai/dendrite_count"] = max(tracker_count, state_count)
 
         if best_validation_snapshot:
             epoch_log["flowers/test_accuracy_at_best_validation"] = best_validation_snapshot[
