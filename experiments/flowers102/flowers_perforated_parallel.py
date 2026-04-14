@@ -929,6 +929,49 @@ def _model_has_pai_modules(model: nn.Module) -> bool:
     return any(any(marker in key for marker in markers) for key in keys)
 
 
+def _count_dendrite_modules_from_state(model: nn.Module) -> int:
+    """Count distinct modules that currently expose PAI dendrite wrappers."""
+    model_for_check = model.module if isinstance(model, DDP) else model
+    try:
+        keys = model_for_check.state_dict().keys()
+    except Exception:
+        return 0
+
+    dendrite_prefixes = set()
+    marker = ".dendrite_module."
+    for key in keys:
+        if marker in key:
+            dendrite_prefixes.add(key.split(marker, 1)[0])
+    return len(dendrite_prefixes)
+
+
+def _effective_dendrite_count(model: nn.Module) -> int:
+    """Return a robust dendrite count that survives tracker resets across reloads."""
+    tracker_count = 0
+    if hasattr(GPA, "pai_tracker") and hasattr(GPA.pai_tracker, "member_vars"):
+        try:
+            raw_count = GPA.pai_tracker.member_vars.get("num_dendrites_added", 0)
+            tracker_count = int(raw_count) if raw_count is not None else 0
+        except Exception:
+            tracker_count = 0
+
+    state_count = _count_dendrite_modules_from_state(model)
+    effective_count = max(tracker_count, state_count)
+
+    # Keep tracker value monotonic for downstream PAI plots/CSV exports.
+    if (
+        hasattr(GPA, "pai_tracker")
+        and hasattr(GPA.pai_tracker, "member_vars")
+        and effective_count > tracker_count
+    ):
+        try:
+            GPA.pai_tracker.member_vars["num_dendrites_added"] = effective_count
+        except Exception:
+            pass
+
+    return effective_count
+
+
 def _is_nonfatal_pai_system_exit(exc: BaseException) -> bool:
     """Treat known PAI interactive exit codes as non-fatal in batch training."""
     if not isinstance(exc, SystemExit):
@@ -1960,12 +2003,7 @@ def main() -> None:
         }
 
         if hasattr(GPA, "pai_tracker"):
-            # Try tracker first, but also count from state_dict as fallback
-            # (tracker can reset to 0 across reloads but state_dict has the truth)
-            tracker_count = GPA.pai_tracker.member_vars.get("num_dendrites_added", 0) or 0
-            model_for_count = model.module if isinstance(model, DDP) else model
-            state_count = sum(1 for k in model_for_count.state_dict().keys() if ".dendrite_module." in k and ".weight" in k)
-            epoch_log["perforatedai/dendrite_count"] = max(tracker_count, state_count)
+            epoch_log["perforatedai/dendrite_count"] = _effective_dendrite_count(model)
 
         if best_validation_snapshot:
             epoch_log["flowers/test_accuracy_at_best_validation"] = best_validation_snapshot[
