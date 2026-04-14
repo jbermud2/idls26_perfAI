@@ -166,53 +166,19 @@ def _selected_convert_module_id(args) -> str:
 def configure_pai(args, model: Optional[nn.Module] = None) -> None:
     """Configure PerforatedAI global parameters.
 
-    Uses Rorry's pattern from trainers/train_perforated_resnet.py:
-    - append_module_ids_to_track() to tell PAI to SKIP every frozen / non-target module
-    - append_module_names_to_convert(["Linear"]) to restrict dendrite type to Linear only
-    - Only .pre_fc (or .classifier_fc) remains as the live conversion target
+    Strategy: Use EXPLICIT module ID targeting only.
+    - append_module_ids_to_convert([".pre_fc"]) to tell PAI ONLY this module gets dendrites
+    - Do NOT use append_module_names_to_convert (type-based) as it converts ALL matching types
 
-    PAI diagnostic #6 fires when a frozen module is converted but never received gradients.
-    Registering all frozen module IDs as "tracked" (i.e. skipped) before initialize_pai
-    prevents PAI from wrapping them and eliminates the mode-switch crash.
+    This avoids the issue where PAI converts both .pre_fc AND .classifier_fc when
+    we say "convert Linear layers" — we only want .pre_fc.
     """
     GPA.pc.set_testing_dendrite_capacity(False)
 
-    # --- Restrict dendrite type to Linear layers only (mirrors Rorry's BasicBlock/Bottleneck list) ---
-    GPA.pc.append_module_names_to_convert(["Linear"])
-
-    # --- Mark every frozen / non-target module so PAI skips it entirely ---
-    # EfficientNetB5PAI layout:
-    #   .features.*          – frozen backbone (196 sub-modules)
-    #   .avgpool             – pooling, no grads
-    #   .pre_fc              – ← ONLY dendrite target
-    #   .classifier_dropout  – dropout, skip
-    #   .classifier_fc       – final classifier, skip (unless pai_convert_target == classifier_fc)
     convert_target = _selected_convert_module_id(args)  # ".pre_fc" or ".classifier_fc"
 
-    frozen_top_level = [".avgpool", ".classifier_dropout", ".classifier_fc"]
-    if convert_target == ".classifier_fc":
-        # If user chose classifier_fc as target, keep pre_fc frozen instead
-        frozen_top_level = [".avgpool", ".classifier_dropout", ".pre_fc"]
-
-    # Always exclude top-level .features block
-    frozen_ids = [".features"] + frozen_top_level
-
-    # If the model is provided, also enumerate every named sub-module under .features
-    # so PAI cannot slip through any child that isn't covered by the parent prefix.
-    if model is not None:
-        model_for_enum = model.module if isinstance(model, DDP) else model
-        for name, _ in model_for_enum.named_modules():
-            if name == "":
-                continue
-            if name.startswith("features") or name in (
-                "avgpool", "classifier_dropout", "classifier_fc",
-                "pre_fc" if convert_target != ".pre_fc" else "__skip__",
-            ):
-                dot_name = "." + name
-                if dot_name not in frozen_ids:
-                    frozen_ids.append(dot_name)
-
-    GPA.pc.append_module_ids_to_track(frozen_ids)
+    # EXPLICIT: Tell PAI to convert ONLY this specific module ID
+    GPA.pc.append_module_ids_to_convert([convert_target])
 
     # Verbose is left ON so PAI diagnostic messages appear in the log (helps debug).
     GPA.pc.set_verbose(True)
@@ -225,9 +191,8 @@ def configure_pai(args, model: Optional[nn.Module] = None) -> None:
     if hasattr(GPA.pc, "set_unwrapped_modules_confirmed") and not args.strict_unwrapped_check:
         GPA.pc.set_unwrapped_modules_confirmed(True)
 
-    print(f"PAI: dendrite target = {convert_target}")
-    print(f"PAI: frozen/skipped module IDs registered ({len(frozen_ids)}): {frozen_ids[:8]}{'...' if len(frozen_ids) > 8 else ''}")
-    print(f"PAI: module_names_to_convert = ['Linear']")
+    print(f"PAI: EXPLICIT module_ids_to_convert = ['{convert_target}']")
+    print(f"PAI: No type-based filtering (module_names_to_convert not used)")
 
     # threshold presets when integer presets are provided.
     if float(args.improvement_threshold).is_integer():
