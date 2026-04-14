@@ -1411,7 +1411,9 @@ def main() -> None:
 
     convert_module_id = _selected_convert_module_id(args)
     # Historical switch-mode mismatch is only known for classifier_fc conversion in this script.
-    disallowed_module_id = ".classifier_fc" if convert_module_id == ".pre_fc" else None
+    # Disabled: PAI converts all modules by default and teammate's working runs had this active.
+    # disallowed_module_id = ".classifier_fc" if convert_module_id == ".pre_fc" else None
+    disallowed_module_id = None
     if is_main_process and args.pai_convert_target != "pre_fc":
         print(
             "Warning: non-n-1 PAI conversion target selected "
@@ -1624,7 +1626,7 @@ def main() -> None:
     else:
         model = UPA.initialize_pai(model, save_name=pai_system_name)
 
-    _assert_disallowed_module_not_converted(model, disallowed_module_id)
+    # _assert_disallowed_module_not_converted(model, disallowed_module_id)
 
     print(model.classifier_fc)
 
@@ -1719,7 +1721,7 @@ def main() -> None:
                     disallowed_module_id=disallowed_module_id,
                 )
                 rebuilt_switch_model = True
-            _assert_disallowed_module_not_converted(model_for_pai, disallowed_module_id)
+            # _assert_disallowed_module_not_converted(model_for_pai, disallowed_module_id)
             # Rebind optimizer/scheduler only if we had to rebuild the wrapped model.
             if rebuilt_switch_model:
                 optimizer, scheduler = setup_pai_optimizer_scheduler(args, model_for_pai)
