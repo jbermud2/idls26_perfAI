@@ -166,19 +166,27 @@ def _selected_convert_module_id(args) -> str:
 def configure_pai(args, model: Optional[nn.Module] = None) -> None:
     """Configure PerforatedAI global parameters.
 
-    Strategy: Use EXPLICIT module ID targeting only.
-    - append_module_ids_to_convert([".pre_fc"]) to tell PAI ONLY this module gets dendrites
-    - Do NOT use append_module_names_to_convert (type-based) as it converts ALL matching types
-
-    This avoids the issue where PAI converts both .pre_fc AND .classifier_fc when
-    we say "convert Linear layers" — we only want .pre_fc.
+    Strategy: Use set_module_ids_to_convert to REPLACE (not append) the conversion list.
+    This ensures PAI converts ONLY the specified module and nothing else.
     """
     GPA.pc.set_testing_dendrite_capacity(False)
 
     convert_target = _selected_convert_module_id(args)  # ".pre_fc" or ".classifier_fc"
 
-    # EXPLICIT: Tell PAI to convert ONLY this specific module ID
-    GPA.pc.append_module_ids_to_convert([convert_target])
+    # REPLACE the conversion list entirely — only convert this specific module ID
+    # Using set_ instead of append_ to avoid PAI's default "convert everything" behavior
+    if hasattr(GPA.pc, "set_module_ids_to_convert"):
+        GPA.pc.set_module_ids_to_convert([convert_target])
+    else:
+        # Fallback: try to clear and then append
+        try:
+            GPA.pc.module_ids_to_convert = [convert_target]
+        except AttributeError:
+            GPA.pc.append_module_ids_to_convert([convert_target])
+
+    # Also explicitly set module_names_to_convert to empty to prevent type-based conversion
+    if hasattr(GPA.pc, "set_module_names_to_convert"):
+        GPA.pc.set_module_names_to_convert([])
 
     # Verbose is left ON so PAI diagnostic messages appear in the log (helps debug).
     GPA.pc.set_verbose(True)
@@ -191,8 +199,8 @@ def configure_pai(args, model: Optional[nn.Module] = None) -> None:
     if hasattr(GPA.pc, "set_unwrapped_modules_confirmed") and not args.strict_unwrapped_check:
         GPA.pc.set_unwrapped_modules_confirmed(True)
 
-    print(f"PAI: EXPLICIT module_ids_to_convert = ['{convert_target}']")
-    print(f"PAI: No type-based filtering (module_names_to_convert not used)")
+    print(f"PAI: set_module_ids_to_convert = ['{convert_target}']")
+    print(f"PAI: set_module_names_to_convert = [] (disabled type-based conversion)")
 
     # threshold presets when integer presets are provided.
     if float(args.improvement_threshold).is_integer():
