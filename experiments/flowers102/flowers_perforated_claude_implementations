@@ -934,53 +934,30 @@ def _model_has_pai_modules(model: nn.Module) -> bool:
 
 
 def _count_dendrite_modules_from_state(model: nn.Module) -> int:
-    """Count individual dendrites added across all PAI-converted modules.
-
-    Counts unique (module_prefix, dendrite_index) pairs so that 3 dendrites
-    added to one module returns 3, not 1.
-    """
+    """Count distinct modules that currently expose PAI dendrite wrappers."""
     model_for_check = model.module if isinstance(model, DDP) else model
     try:
         keys = model_for_check.state_dict().keys()
     except Exception:
         return 0
 
-    dendrite_entries = set()
+    dendrite_prefixes = set()
     marker = ".dendrite_module."
     for key in keys:
         if marker in key:
-            parts = key.split(marker, 1)
-            prefix = parts[0]
-            idx = parts[1].split(".")[0]
-            dendrite_entries.add((prefix, idx))
-    return len(dendrite_entries)
+            dendrite_prefixes.add(key.split(marker, 1)[0])
+    return len(dendrite_prefixes)
 
 
-def _effective_dendrite_count(model: nn.Module) -> int:
-    """Return a robust dendrite count that survives tracker resets across reloads."""
-    tracker_count = 0
+def _read_tracker_dendrite_count() -> int:
+    """Read the current active-dendrite count from the PAI tracker."""
     if hasattr(GPA, "pai_tracker") and hasattr(GPA.pai_tracker, "member_vars"):
         try:
-            raw_count = GPA.pai_tracker.member_vars.get("num_dendrites_added", 0)
-            tracker_count = int(raw_count) if raw_count is not None else 0
-        except Exception:
-            tracker_count = 0
-
-    state_count = _count_dendrite_modules_from_state(model)
-    effective_count = max(tracker_count, state_count)
-
-    # Keep tracker value monotonic for downstream PAI plots/CSV exports.
-    if (
-        hasattr(GPA, "pai_tracker")
-        and hasattr(GPA.pai_tracker, "member_vars")
-        and effective_count > tracker_count
-    ):
-        try:
-            GPA.pai_tracker.member_vars["num_dendrites_added"] = effective_count
+            raw = GPA.pai_tracker.member_vars.get("num_dendrites_added", 0)
+            return int(raw) if raw is not None else 0
         except Exception:
             pass
-
-    return effective_count
+    return 0
 
 
 def _is_nonfatal_pai_system_exit(exc: BaseException) -> bool:
@@ -1745,6 +1722,7 @@ def main() -> None:
     running_stats: Dict[str, float] = {}
     best_validation_accuracy = float("-inf")
     best_validation_snapshot: Dict[str, float] = {}
+    best_dendrite_count = 0
     start_epoch = 1
     warned_missing_pai_nonmain = False
 
@@ -1759,6 +1737,7 @@ def main() -> None:
             running_stats = checkpoint.get("running_stats", running_stats)
             best_validation_accuracy = checkpoint.get("best_validation_accuracy", best_validation_accuracy)
             best_validation_snapshot = checkpoint.get("best_validation_snapshot", best_validation_snapshot)
+            best_dendrite_count = checkpoint.get("best_dendrite_count", 0)
             loaded_epoch = int(checkpoint.get("epoch", 0))
             start_epoch = loaded_epoch + 1
             if is_main_process:
@@ -2033,7 +2012,9 @@ def main() -> None:
         }
 
         if hasattr(GPA, "pai_tracker"):
-            epoch_log["perforatedai/dendrite_count"] = _effective_dendrite_count(model)
+            # Take a running max so the count survives tracker resets from load_system calls.
+            best_dendrite_count = max(best_dendrite_count, _read_tracker_dendrite_count())
+            epoch_log["perforatedai/dendrite_count"] = best_dendrite_count
 
         if best_validation_snapshot:
             epoch_log["flowers/test_accuracy_at_best_validation"] = best_validation_snapshot[
@@ -2060,6 +2041,7 @@ def main() -> None:
                 "running_stats": running_stats,
                 "best_validation_accuracy": best_validation_accuracy,
                 "best_validation_snapshot": best_validation_snapshot,
+                "best_dendrite_count": best_dendrite_count,
                 "finetune_backbone": args.finetune_backbone,
             }
             try:
