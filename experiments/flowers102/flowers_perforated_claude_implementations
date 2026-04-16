@@ -205,7 +205,7 @@ def configure_pai(args) -> None:
 
     # Per Rorry: use set_silent(True) to reduce noise but keep important messages.
     # This is preferred over set_verbose(False) which hides too much.
-    GPA.pc.set_verbose(False)
+    GPA.pc.set_verbose(True)
     if hasattr(GPA.pc, "set_silent"):
         GPA.pc.set_silent(True)
 
@@ -371,7 +371,11 @@ def ensure_pai_switch_files_exist(
     is_distributed: bool,
     is_main_process: bool,
 ) -> None:
-    """Ensure PerforatedAI switch-mode checkpoint files exist in a DDP-safe way."""
+    """Ensure PerforatedAI switch-mode checkpoint files exist in a DDP-safe way.
+    
+    Updates latest.pt at every call to keep PAI's state in sync with current model.
+    Only creates best_model.pt on first run to avoid overwriting the best state.
+    """
     pai_root = os.path.abspath(os.path.normpath(pai_system_name))
     os.makedirs(pai_root, exist_ok=True)
 
@@ -380,8 +384,12 @@ def ensure_pai_switch_files_exist(
 
     # Own file creation on rank 0 to avoid races/no-op saves on non-owner ranks.
     if is_main_process:
-        if not os.path.exists(latest_path) and hasattr(UPA, "save_system"):
+        # CRITICAL: Always update latest.pt to keep PAI's checkpoint state synchronized with current model.
+        # This ensures PAI's internal state machine (add_validation_score) has a valid reference checkpoint.
+        if hasattr(UPA, "save_system"):
             UPA.save_system(model, pai_root, "latest")
+        
+        # Only create best_model.pt on first run; don't overwrite it on subsequent epochs.
         if not os.path.exists(best_model_path) and hasattr(UPA, "save_system"):
             UPA.save_system(model, pai_root, "best_model")
 
@@ -949,15 +957,20 @@ def _count_dendrite_modules_from_state(model: nn.Module) -> int:
     return len(dendrite_prefixes)
 
 
-def _read_tracker_dendrite_count() -> int:
-    """Read the current active-dendrite count from the PAI tracker."""
-    if hasattr(GPA, "pai_tracker") and hasattr(GPA.pai_tracker, "member_vars"):
-        try:
-            raw = GPA.pai_tracker.member_vars.get("num_dendrites_added", 0)
-            return int(raw) if raw is not None else 0
-        except Exception:
-            pass
-    return 0
+def _compute_dendrite_count(model: nn.Module, base_total_params: int, params_per_dendrite: int) -> int:
+    """Derive active dendrite count from parameter delta.
+
+    PAI adds exactly params_per_dendrite new parameters for each dendrite it activates,
+    so the count is simply (current_total - base_total) / params_per_dendrite.
+    """
+    if params_per_dendrite <= 0:
+        return 0
+    model_for_check = model.module if isinstance(model, DDP) else model
+    current_total = sum(p.numel() for p in model_for_check.parameters())
+    delta = current_total - base_total_params
+    if delta <= 0:
+        return 0
+    return round(delta / params_per_dendrite)
 
 
 def _is_nonfatal_pai_system_exit(exc: BaseException) -> bool:
@@ -1610,6 +1623,15 @@ def main() -> None:
     )
     model = EfficientNetB5PAI(base_model)
 
+    # Capture params of the convert target BEFORE PAI wraps it so we can derive
+    # dendrite count from parameter delta later (PAI adds exactly this many params
+    # per dendrite, and the internal tracker key is not part of the public API).
+    _target_attr = args.pai_convert_target  # "pre_fc" or "classifier_fc"
+    _target_module = getattr(model, _target_attr, None)
+    params_per_dendrite = (
+        sum(p.numel() for p in _target_module.parameters()) if _target_module is not None else 0
+    )
+
     # Configure PAI module selection: explicit target, full reset of all selector lists.
     configure_pai(args)
     if is_main_process:
@@ -1697,6 +1719,8 @@ def main() -> None:
     total_params, trainable_params = count_parameters(model)
     print(f"Total parameters: {total_params:,}")
     print(f"Trainable parameters: {trainable_params:,}")
+    # Baseline total after PAI init (0 dendrites); used to compute dendrite count via param delta.
+    base_total_params = total_params
 
     model = model.to(device)
     model_without_ddp = model
@@ -1828,6 +1852,7 @@ def main() -> None:
                         float(val_metrics["accuracy"]),
                         model_for_pai,
                     )
+                    print(f"PAI return {'true' if restructured else 'false'} (restructured={restructured}, training_complete={training_complete})", force=True)
             except SystemExit as exc:
                 if _is_nonfatal_pai_system_exit(exc):
                     print(
@@ -1840,6 +1865,9 @@ def main() -> None:
                 print(f"PAI add_validation_score failed once: {exc}. Attempting recovery and single retry.")
                 try:
                     model_for_pai = recover_pai_model_if_needed(model_for_pai, pai_system_name)
+                    # Retry path: PAI may have dropped internal optimizer/scheduler references
+                    # after the first failure. Rebind them before calling add_validation_score again.
+                    optimizer, scheduler = setup_pai_optimizer_scheduler(args, model_for_pai)
                     with warnings.catch_warnings():
                         warnings.filterwarnings(
                             "ignore",
@@ -1867,6 +1895,15 @@ def main() -> None:
                         "PAI add_validation_score retry failed; "
                         f"ending training cleanly to avoid DDP rank desync: {retry_exc}"
                     )
+
+            # CRITICAL: After PAI restructuring adds dendrites, explicitly save the new state to latest.pt
+            # BEFORE non-main ranks attempt to load it. Otherwise, they will load stale pre-dendrite state.
+            if restructured and hasattr(UPA, "save_system"):
+                try:
+                    UPA.save_system(model_for_pai, pai_system_name, "latest")
+                    print(f"Saved restructured model (with dendrites) to latest.pt after switch.", force=True)
+                except Exception as exc:
+                    print(f"Warning: Failed to save restructured model to latest.pt: {exc}")
 
         # PAI's switch can initialize new dendrite tensors on CPU; move to device here
         # so the next forward pass doesn't hit a device mismatch.  Safe no-op for non-main ranks.
@@ -2012,8 +2049,16 @@ def main() -> None:
         }
 
         if hasattr(GPA, "pai_tracker"):
-            # Take a running max so the count survives tracker resets from load_system calls.
-            best_dendrite_count = max(best_dendrite_count, _read_tracker_dendrite_count())
+            # Primary source: param delta (robust across load_system tracker resets).
+            param_delta_count = _compute_dendrite_count(model, base_total_params, params_per_dendrite)
+            # Secondary source: tracker member_vars (authoritative when not reset).
+            tracker_count = 0
+            if hasattr(GPA.pai_tracker, "member_vars"):
+                try:
+                    tracker_count = int(GPA.pai_tracker.member_vars.get("num_dendrites_added", 1) or 0)
+                except Exception:
+                    pass
+            best_dendrite_count = max(best_dendrite_count, param_delta_count, tracker_count)
             epoch_log["perforatedai/dendrite_count"] = best_dendrite_count
 
         if best_validation_snapshot:
