@@ -1445,6 +1445,10 @@ def main() -> None:
         pai_switch_error = False
 
         if is_main_process:
+            # Snapshot parameter count before PAI call to detect silent restructures
+            # (PAI may add dendrites then crash during post-processing)
+            pre_switch_param_count = sum(p.numel() for p in model_for_pai.parameters())
+
             try:
                 with warnings.catch_warnings():
                     warnings.filterwarnings(
@@ -1461,28 +1465,59 @@ def main() -> None:
                 else:
                     raise
             except Exception as exc:
-                print(f"PAI add_validation_score failed once: {exc}. Attempting recovery and single retry.")
-                try:
-                    model_for_pai = recover_pai_model_if_needed(model_for_pai, pai_system_name)
-                    with warnings.catch_warnings():
-                        warnings.filterwarnings(
-                            "ignore",
-                            message="No artists with labels found to put in legend.*",
-                            category=UserWarning,
-                        )
-                        model_for_pai, restructured, training_complete = _call_pai_add_validation_score(
-                            args, float(val_metrics["accuracy"]), model_for_pai,
-                        )
-                    print("PAI add_validation_score retry succeeded after recovery.")
-                except SystemExit as retry_exc:
-                    if _is_nonfatal_pai_system_exit(retry_exc):
-                        print(f"PAI add_validation_score retry returned non-fatal SystemExit (code={retry_exc.code!r}); continuing.")
-                    else:
-                        raise
-                except Exception as retry_exc:
-                    pai_switch_error = True
-                    training_complete = True
-                    print(f"PAI add_validation_score retry failed; ending training cleanly: {retry_exc}")
+                post_param_count = sum(p.numel() for p in model_for_pai.parameters())
+                if post_param_count != pre_switch_param_count:
+                    print(
+                        f"PAI add_validation_score crashed ({exc}) but model was restructured "
+                        f"(params {pre_switch_param_count:,} -> {post_param_count:,}). "
+                        "Treating as successful restructure and continuing training."
+                    )
+                    restructured = True
+                    training_complete = False
+                else:
+                    print(f"PAI add_validation_score failed once: {exc}. Attempting recovery and single retry.")
+                    try:
+                        model_for_pai = recover_pai_model_if_needed(model_for_pai, pai_system_name)
+                        optimizer, scheduler = setup_pai_optimizer_scheduler(args, model_for_pai)
+                        with warnings.catch_warnings():
+                            warnings.filterwarnings(
+                                "ignore",
+                                message="No artists with labels found to put in legend.*",
+                                category=UserWarning,
+                            )
+                            model_for_pai, restructured, training_complete = _call_pai_add_validation_score(
+                                args,
+                                float(val_metrics["accuracy"]),
+                                model_for_pai,
+                            )
+                        print("PAI add_validation_score retry succeeded after recovery.")
+                    except SystemExit as retry_exc:
+                        if _is_nonfatal_pai_system_exit(retry_exc):
+                            print(
+                                "PAI add_validation_score retry returned non-fatal SystemExit "
+                                f"(code={retry_exc.code!r}); continuing without restructure this epoch."
+                            )
+                        else:
+                            raise
+                    except Exception as retry_exc:
+                        post_retry_param_count = sum(p.numel() for p in model_for_pai.parameters())
+                        if post_retry_param_count != pre_switch_param_count:
+                            print(
+                                f"PAI retry crashed ({retry_exc}) but model was restructured "
+                                f"(params {pre_switch_param_count:,} -> {post_retry_param_count:,}). "
+                                "Treating as successful restructure and continuing training."
+                            )
+                            restructured = True
+                            training_complete = False
+                        else:
+                            # No restructure occurred - PAI just crashed during internal bookkeeping.
+                            # This is not fatal: skip PAI decision this epoch and continue training.
+                            print(
+                                f"PAI add_validation_score crashed ({retry_exc}) but no restructure occurred. "
+                                "Skipping PAI decision this epoch and continuing training."
+                            )
+                            restructured = False
+                            training_complete = False
 
         if is_distributed:
             # ----------------------------------------------------------------
@@ -1507,6 +1542,15 @@ def main() -> None:
                 # dendrite layers that PAI added during restructuring.
                 # ------------------------------------------------------------
                 if is_main_process:
+                    # Save updated PAI state after restructuring (before broadcast)
+                    # This ensures checkpoint files reflect the new model structure
+                    pai_root = os.path.abspath(os.path.normpath(pai_system_name))
+                    if hasattr(UPA, "save_system"):
+                        with suppress_output():
+                            UPA.save_system(model_for_pai, pai_root, "latest")
+                            UPA.save_system(model_for_pai, pai_root, "best_model")
+                        print(f"[rank 0] Saved updated PAI state to {pai_root}/")
+                    
                     print(
                         f"[rank 0] PAI restructured model (dendrites added). "
                         "Broadcasting full model to all ranks..."
@@ -1583,8 +1627,14 @@ def main() -> None:
                 except Exception as exc:
                     print(f"Failed to save best model to {best_model_path}: {exc}")
 
+        # Count parameters each epoch (important for PAI since params change when dendrites are added)
+        model_for_count = model.module if isinstance(model, DDP) else model
+        total_params, trainable_params = count_parameters(model_for_count)
+
         epoch_log: Dict[str, Optional[float]] = {
             "epoch": epoch,
+            "model/num_parameters": total_params,
+            "model/trainable_parameters": trainable_params,
             "perforatedai/train_accuracy": train_accuracy,
             "perforatedai/train_top5_accuracy": train_top5_accuracy,
             "perforatedai/validation_accuracy": validation_accuracy,
