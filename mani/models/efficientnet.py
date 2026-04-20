@@ -15,6 +15,7 @@ IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 
 NUM_CLASSES = 102
+NUM_CLASSES_PETS = 37  # OxfordIIITPet has 37 breeds
 DEFAULT_CROP_SIZE = 456
 DEFAULT_RESIZE_SIZE = 466
 
@@ -54,6 +55,31 @@ def efficientnet_b5_flowers102(
         for p in model.features.parameters():
             p.requires_grad = False
 
+    return model
+
+def efficientnet_b5_pets(
+    num_classes: int = NUM_CLASSES_PETS,
+    finetune_backbone: bool = False,
+):
+    weights = _efficientnet_b5_imagenet_weights()
+    if weights is not None:
+        model = efficientnet_b5(weights=weights)
+    else:
+        try:
+            model = efficientnet_b5(weights="DEFAULT")
+        except Exception:
+            try:
+                model = efficientnet_b5(pretrained=True)  # type: ignore[call-arg]
+            except Exception:
+                model = efficientnet_b5(weights=None)
+ 
+    in_features = model.classifier[1].in_features
+    model.classifier[1] = nn.Linear(in_features, num_classes)
+ 
+    if not finetune_backbone:
+        for p in model.features.parameters():
+            p.requires_grad = False
+ 
     return model
 
 

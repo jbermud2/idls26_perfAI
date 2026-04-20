@@ -36,7 +36,7 @@ import torch
 import torch.distributed as dist
 
 from data.registry import get_dataset_builder
-from models import EfficientNetB5PAI, NUM_CLASSES, build_transforms, efficientnet_b5_flowers102
+from models import EfficientNetB5PAI, NUM_CLASSES_PETS, build_transforms, efficientnet_b5_pets
 from trainer.eval import test
 from trainer.train import train
 from utils.ddp_utils import (
@@ -88,7 +88,7 @@ except ImportError:
 
 FLOWERS_DATASET_ROOT_DEFAULT = "/ocean/projects/cis260045p/shared/data"
 DEFAULT_PAI_CONVERT_TARGET = "pre_fc"
-DATASET_REGISTRY_NAME = "flowers102"
+DATASET_REGISTRY_NAME = "pets"
 MODEL_NAME = "efficientnet_b5"
 
 
@@ -111,9 +111,9 @@ def main():
     parser.add_argument("--no-download", action="store_true", default=False)
     parser.add_argument("--num-workers", type=int, default=4, metavar="N")
     parser.add_argument("--use-wandb", action="store_true", default=False)
-    parser.add_argument("--wandb-project", type=str, default="MNIST_PERF")
+    parser.add_argument("--wandb-project", type=str, default=f"{MODEL_NAME}_{DATASET_REGISTRY_NAME}")
     parser.add_argument("--wandb-entity", type=str, default="PerforatedAI_IDL")
-    parser.add_argument("--wandb-run-name", type=str, default="EfficientNet_B5_Flowers102")
+    parser.add_argument("--wandb-run-name", type=str, default="EfficientNet_B5_Pets")
     parser.add_argument("--wandb-mode", type=str, default="online", choices=["online", "offline", "disabled"])
     parser.add_argument("--wandb-api-key", type=str, default="")
     parser.add_argument("--wandb-run-id", type=str, default="")
@@ -238,7 +238,7 @@ def main():
     if args.rank == 0:
         print("Prepared Dataloaders")
 
-    base_model = efficientnet_b5_flowers102(num_classes=NUM_CLASSES, finetune_backbone=args.finetune_backbone)
+    base_model = efficientnet_b5_pets(num_classes=NUM_CLASSES_PETS, finetune_backbone=args.finetune_backbone)
     model = EfficientNetB5PAI(base_model)
     if args.rank == 0:
         print(f"Loaded the following model: {MODEL_NAME}")
