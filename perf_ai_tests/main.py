@@ -74,10 +74,10 @@ def main():
     parser = argparse.ArgumentParser(
         description="PyTorch transfer learning with EfficientNet-B5 + PerforatedAI (No DDP)."
     )
-    parser.add_argument("--batch-size", type=int, default=256, metavar="N")
+    parser.add_argument("--batch-size", type=int, default=64, metavar="N")
     parser.add_argument("--test-batch-size", type=int, default=128, metavar="N")
-    parser.add_argument("--epochs", type=int, default=40, metavar="N")
-    parser.add_argument("--lr", type=float, default=1e-3, metavar="LR")
+    parser.add_argument("--epochs", type=int, default=200, metavar="N")
+    parser.add_argument("--lr", type=float, default=1e-4, metavar="LR")
     parser.add_argument("--weight-decay", type=float, default=1e-4, metavar="WD")
     parser.add_argument("--finetune-backbone", action="store_true", default=False)
     parser.add_argument("--no-cuda", action="store_true", default=False)
