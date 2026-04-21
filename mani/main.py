@@ -7,7 +7,13 @@ interact -p GPU-shared --gres=gpu:v100-32:1 -t 8:00:00 -A cis260045p
 interact -p GPU-shared --gres=gpu:h100-80:1 -t 8:00:00 -A cis260045p
 
 Single GPU:
-python main.py --data-root /ocean/projects/cis260045p/shared/data --use-wandb --wandb-api-key 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 --dendrite-mode 1 --max-dendrites 5 --pai-forward-function relu --improvement-threshold 0.5 --candidate-weight-init-mult 0.1 > output.txt 2>&1
+python /ocean/projects/cis260045p/jbermude/idls26_perfAI/mani/main.py --data-root /ocean/projects/cis260045p/shared/data --use-wandb --dendrite-mode 2 --max-dendrites 3 --pai-forward-function relu --improvement-threshold 1 --candidate-weight-init-mult 0.1 > output.txt 2>&1
+
+Perforated Backpropagation (--dendrite-mode 2): install the perforatedbp add-on, then export credentials before Python (do not commit secrets):
+  export PAIEMAIL='your@email'
+  export PAITOKEN='your_token'
+  python .../main.py ... --dendrite-mode 2 ...
+(See mani/API/customization.md.)
 
 Multi-GPU DDP:
 
@@ -36,7 +42,13 @@ import torch
 import torch.distributed as dist
 
 from data.registry import get_dataset_builder
-from models import EfficientNetB5PAI, NUM_CLASSES_PETS, build_transforms, efficientnet_b5_pets
+# from models import EfficientNetB5PAI, NUM_CLASSES_PETS, build_transforms, efficientnet_b5_pets
+from models.efficientnet import (
+    EfficientNetB5PAI,
+    NUM_CLASSES_PETS,
+    build_transforms,
+    efficientnet_b5_pets,
+)
 from trainer.eval import test
 from trainer.train import train
 from utils.ddp_utils import (
@@ -86,7 +98,7 @@ except ImportError:
     UPA = None
 
 
-FLOWERS_DATASET_ROOT_DEFAULT = "/ocean/projects/cis260045p/shared/data"
+PETS_DATASET_ROOT_DEFAULT = "/ocean/projects/cis260045p/shared/data"
 DEFAULT_PAI_CONVERT_TARGET = "pre_fc"
 DATASET_REGISTRY_NAME = "pets"
 MODEL_NAME = "efficientnet_b5"
@@ -96,9 +108,9 @@ def main():
     parser = argparse.ArgumentParser(
         description="PyTorch transfer learning with EfficientNet-B5 + PerforatedAI (DDP support)."
     )
-    parser.add_argument("--batch-size", type=int, default=256, metavar="N")
+    parser.add_argument("--batch-size", type=int, default=64, metavar="N") # changed to 64 using Olivia's advice
     parser.add_argument("--test-batch-size", type=int, default=128, metavar="N")
-    parser.add_argument("--epochs", type=int, default=40, metavar="N")
+    parser.add_argument("--epochs", type=int, default=100, metavar="N")
     parser.add_argument("--lr", type=float, default=1e-3, metavar="LR")
     parser.add_argument("--weight-decay", type=float, default=1e-4, metavar="WD")
     parser.add_argument("--finetune-backbone", action="store_true", default=False)
@@ -107,9 +119,9 @@ def main():
     parser.add_argument("--dry-run", action="store_true", default=False)
     parser.add_argument("--seed", type=int, default=1, metavar="S")
     parser.add_argument("--log-interval", type=int, default=10, metavar="N")
-    parser.add_argument("--data-root", type=str, default=FLOWERS_DATASET_ROOT_DEFAULT)
+    parser.add_argument("--data-root", type=str, default=PETS_DATASET_ROOT_DEFAULT)
     parser.add_argument("--no-download", action="store_true", default=False)
-    parser.add_argument("--num-workers", type=int, default=4, metavar="N")
+    parser.add_argument("--num-workers", type=int, default=6, metavar="N")
     parser.add_argument("--use-wandb", action="store_true", default=False)
     parser.add_argument("--wandb-project", type=str, default=f"{MODEL_NAME}_{DATASET_REGISTRY_NAME}")
     parser.add_argument("--wandb-entity", type=str, default="PerforatedAI_IDL")
@@ -119,7 +131,13 @@ def main():
     parser.add_argument("--wandb-run-id", type=str, default="")
     parser.add_argument("--wandb-resume", type=str, default="allow", choices=["allow", "must", "never"])
     parser.add_argument("--wandb-anonymous", type=str, default="never", choices=["never", "allow", "must"])
-    parser.add_argument("--dendrite-mode", type=int, default=1, choices=[0, 1, 2])
+    parser.add_argument(
+        "--dendrite-mode",
+        type=int,
+        default=1,
+        choices=[0, 1, 2],
+        help="0=no dendrites, 1=PAI without Perforated BP, 2=Perforated Backpropagation (requires perforatedbp + PAITOKEN/PAIEMAIL env).",
+    )
     parser.add_argument("--max-dendrites", type=int, default=3)
     parser.add_argument("--improvement-threshold", type=float, default=1.0)
     parser.add_argument("--candidate-weight-init-mult", type=float, default=0.1)
@@ -145,6 +163,21 @@ def main():
         raise ImportError(
             "PerforatedAI is required for this script. Install it from the PerforatedAI source/package used in your environment."
         )
+
+    # if args.dendrite_mode == 2:
+    #     try:
+    #         import perforatedbp  # noqa: F401
+    #     except ImportError as exc:
+    #         raise ImportError(
+    #             "Perforated Backpropagation (--dendrite-mode 2) requires the `perforatedbp` "
+    #             "package. Install the Perforated Backpropagation add-on in this environment."
+    #         ) from exc
+    #     if not os.environ.get("PAITOKEN") or not os.environ.get("PAIEMAIL"):
+    #         raise RuntimeError(
+    #             "Perforated Backpropagation (--dendrite-mode 2) requires PAITOKEN and "
+    #             "PAIEMAIL to be set in the environment before launching Python "
+    #             "(see mani/API/customization.md)."
+    #         )
 
     # Only disable interactive breakpoints in single-GPU non-init mode;
     # DDP and init mode need sys.exit() to work for controlled restarts.
@@ -303,7 +336,6 @@ def main():
     while True:
         epoch += 1
         epoch_start = time.perf_counter()
-
         if args.distributed and train_sampler is not None:
             train_sampler.set_epoch(epoch)
 
@@ -351,7 +383,6 @@ def main():
         if args.rank == 0:
             print(f"Restructured status: {restructured}")
             print(f"Training complete status: {training_complete}")
-
         if training_complete:
             if args.distributed:
                 if args.rank == 0:

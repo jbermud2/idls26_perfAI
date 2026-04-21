@@ -70,6 +70,7 @@ def init_wandb(args):
 def log_to_wandb(run, metrics: Dict, step: Optional[int] = None):
     if run is None:
         return
+    print("LOGGING TO WANDB")
     run.log(metrics, step=step)
 
 

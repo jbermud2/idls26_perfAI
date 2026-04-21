@@ -37,9 +37,9 @@ def train(
         #     fill_missing_parameter_gradients(model)
         output = model(data)
         loss = F.cross_entropy(output, target)
-        print("BEFORE BACKWARD")
+        # print("BEFORE BACKWARD")
         loss.backward()
-        print("AFTER BACKWARD")
+        # print("AFTER BACKWARD")
         if args.perforate_model_parallel:
             if GPA is not None:
                 GPA.pai_tracker.save_tracker_settings()

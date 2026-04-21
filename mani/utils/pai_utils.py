@@ -53,7 +53,7 @@ def configure_pai(args, model: torch.nn.Module):
         GPA.pc.set_weight_decay_accepted(True)
     
     # GPA.pc.set_switch_mode(GPA.pc.DOING_HISTORY)
-    # GPA.pc.set_n_epochs_to_switch(args.epochs//10)
+    # GPA.pc.set_n_epochs_to_switch(args.epochs//12) 
 
     GPA.pc.set_switch_mode(GPA.pc.DOING_FIXED_SWITCH) 
     GPA.pc.set_fixed_switch_num(5) 

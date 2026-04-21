@@ -8,6 +8,7 @@ PYTHON_SCRIPT="main.py"
 NUM_GPUS=2
 
 # Pass any extra arguments through to main.py (e.g. --use-wandb --wandb-api-key ...)
+# Perforated Backpropagation: export PAIEMAIL + PAITOKEN and pass --dendrite-mode 2 (see mani/API/customization.md).
 EXTRA_ARGS="$@"
 
 echo "Step 1: Initializing PAI DDP settings (single GPU, exits after one batch)..."
