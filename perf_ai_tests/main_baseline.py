@@ -1,3 +1,5 @@
+#python main_baseline.py --data-root /ocean/projects/cis260045p/shared/data --use-wandb --wandb-api-key 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
+
 from __future__ import annotations
 
 import argparse
@@ -20,6 +22,7 @@ from utils.metrics_utils import (
     benchmark_inference_throughput,
     compute_model_stats,
     count_parameters,
+    refresh_flops_for_training,
     safe_number,
     update_min_max,
 )
@@ -28,7 +31,7 @@ from utils.wandb_utils import finish_wandb, init_wandb, log_to_wandb
 
 FLOWERS_DATASET_ROOT_DEFAULT = "/ocean/projects/cis260045p/shared/data"
 DATASET_REGISTRY_NAME = "flowers102"
-MODEL_NAME = "efficientnet_b5_baseline"
+MODEL_NAME = "efficientnet_b5"
 
 
 def main():
@@ -37,7 +40,7 @@ def main():
     )
     parser.add_argument("--batch-size", type=int, default=64, metavar="N")
     parser.add_argument("--test-batch-size", type=int, default=128, metavar="N")
-    parser.add_argument("--epochs", type=int, default=200, metavar="N")
+    parser.add_argument("--epochs", type=int, default=150, metavar="N")
     parser.add_argument("--lr", type=float, default=1e-4, metavar="LR")
     parser.add_argument("--weight-decay", type=float, default=1e-4, metavar="WD")
     parser.add_argument("--finetune-backbone", action="store_true", default=False)
@@ -154,6 +157,11 @@ def main():
     print(f"Trainable parameters: {trainable_params:,}")
 
     model = model.to(device)
+    current_flops = float("nan")
+    current_flops_source = "not_computed"
+    model, current_flops, current_flops_source = refresh_flops_for_training(
+        model, device, crop_size
+    )
 
     trainable_param_list = [p for p in model.parameters() if p.requires_grad]
     if not trainable_param_list:
@@ -250,6 +258,8 @@ def main():
             "learning_rate": optimizer.param_groups[0]["lr"],
             "model/num_parameters": total_params,
             "model/trainable_parameters": trainable_params,
+            "model/flops": safe_number(current_flops),
+            "model/flops_source": current_flops_source,
         }
 
         if best_validation_snapshot:
