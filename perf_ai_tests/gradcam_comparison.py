@@ -3,7 +3,7 @@ GradCAM Comparison Script: Baseline vs Perforated EfficientNet-B5
 =================================================================
 Works with:
   - main_baseline.py  → saves plain efficientnet_b5_flowers102 to save_dir/best_model.pt
-  - main(4).py        → saves EfficientNetB5PAI to output_dir/efficientnet_b5_*_best.pt
+  - main.py        → saves EfficientNetB5PAI to output_dir/efficientnet_b5_*_best.pt
 
 Usage on PSC Bridges2:
 ----------------------
