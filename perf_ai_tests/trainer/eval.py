@@ -5,6 +5,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def _classification_loss(model: nn.Module, output: torch.Tensor, target: torch.Tensor):
+    if getattr(model, "uses_log_softmax", False):
+        return F.nll_loss(output, target, reduction="sum")
+    return F.cross_entropy(output, target, reduction="sum")
+
+
 def evaluate(
     model: nn.Module,
     device: torch.device,
@@ -23,7 +29,7 @@ def evaluate(
             output = model(data)
 
             batch_size = target.size(0)
-            total_loss += F.cross_entropy(output, target, reduction="sum").item()
+            total_loss += _classification_loss(model, output, target).item()
             total_seen += batch_size
             pred = output.argmax(dim=1, keepdim=True)
             correct += float(pred.eq(target.view_as(pred)).sum().item())

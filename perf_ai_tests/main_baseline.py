@@ -10,10 +10,9 @@ from typing import Dict
 
 import torch
 import torch.optim as optim
-from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim.lr_scheduler import CosineAnnealingLR, StepLR
 
-from data.registry import get_dataset_builder
-from models import NUM_CLASSES
+from data.registry import get_dataset_builder, list_dataset_names
 from models.registry import get_model_build_config, list_model_build_config_names
 from trainer.eval import test
 from trainer.train import train
@@ -31,7 +30,7 @@ from utils.wandb_utils import finish_wandb, init_wandb, log_checkpoint_artifact,
 
 
 FLOWERS_DATASET_ROOT_DEFAULT = "/ocean/projects/cis260045p/shared/data"
-DATASET_REGISTRY_NAME = "flowers102"
+DEFAULT_DATASET_NAME = "flowers102"
 DEFAULT_MODEL_NAME = "efficientnet_b4"
 
 
@@ -60,10 +59,12 @@ def main():
     parser.add_argument("--data-root", type=str, default=FLOWERS_DATASET_ROOT_DEFAULT)
     parser.add_argument("--no-download", action="store_true", default=False)
     parser.add_argument("--num-workers", type=int, default=model_defaults.get("num_workers", 4), metavar="N")
-    parser.add_argument("--save-dir", type=str, default=f"artifacts_{DEFAULT_MODEL_NAME}_{DATASET_REGISTRY_NAME}_baseline")
+    parser.add_argument("--dataset", type=str, default=DEFAULT_DATASET_NAME, choices=list_dataset_names())
+    parser.add_argument("--gamma", type=float, default=model_defaults.get("gamma", 0.7), metavar="M")
+    parser.add_argument("--save-dir", type=str, default=f"artifacts_{DEFAULT_MODEL_NAME}_{DEFAULT_DATASET_NAME}_baseline")
 
     parser.add_argument("--use-wandb", action="store_true", default=False)
-    parser.add_argument("--wandb-project", type=str, default=f"{DEFAULT_MODEL_NAME}_{DATASET_REGISTRY_NAME}")
+    parser.add_argument("--wandb-project", type=str, default=f"{DEFAULT_MODEL_NAME}_{DEFAULT_DATASET_NAME}")
     parser.add_argument("--wandb-entity", type=str, default="PerforatedAI_IDL")
     parser.add_argument("--wandb-run-name", type=str, default="Normal Gradient Decent")
     parser.add_argument("--wandb-mode", type=str, default="online", choices=["online", "offline", "disabled"])
@@ -82,14 +83,15 @@ def main():
 
     args = parser.parse_args()
     model_config = get_model_build_config(args.model)
+    dataset_name = args.dataset
 
-    default_wandb_project = f"{DEFAULT_MODEL_NAME}_{DATASET_REGISTRY_NAME}"
+    default_wandb_project = f"{DEFAULT_MODEL_NAME}_{DEFAULT_DATASET_NAME}"
     if args.wandb_project == default_wandb_project:
-        args.wandb_project = f"{args.model}_{DATASET_REGISTRY_NAME}"
+        args.wandb_project = f"{args.model}_{dataset_name}"
 
-    default_save_dir = f"artifacts_{DEFAULT_MODEL_NAME}_{DATASET_REGISTRY_NAME}_baseline"
+    default_save_dir = f"artifacts_{DEFAULT_MODEL_NAME}_{DEFAULT_DATASET_NAME}_baseline"
     if args.save_dir == default_save_dir:
-        args.save_dir = f"artifacts_{args.model}_{DATASET_REGISTRY_NAME}_baseline"
+        args.save_dir = f"artifacts_{args.model}_{dataset_name}_baseline"
 
     use_mps = (not args.no_mps) and torch.backends.mps.is_available()
     use_cuda = (not args.no_cuda) and torch.cuda.is_available()
@@ -106,9 +108,9 @@ def main():
     set_seed(args.seed)
 
     download = not args.no_download
-    print(f"Preparing the following dataset: {DATASET_REGISTRY_NAME}")
+    print(f"Preparing the following dataset: {dataset_name}")
     train_transform, val_transform, test_transform, crop_size = model_config.build_transforms()
-    dataset_builder = get_dataset_builder(DATASET_REGISTRY_NAME)
+    dataset_builder = get_dataset_builder(dataset_name)
     train_dataset, val_dataset, test_dataset = dataset_builder(
         data_root=args.data_root,
         train_transform=train_transform,
@@ -164,7 +166,7 @@ def main():
     print("Prepared Dataloaders")
 
     model = model_config.build_model(
-        num_classes=NUM_CLASSES,
+        num_classes=model_config.num_classes,
         finetune_backbone=args.finetune_backbone,
     )
     print(f"Loaded plain {args.model} baseline model")
@@ -187,14 +189,18 @@ def main():
             "Enable trainable layers or run with --finetune-backbone."
         )
 
-    optimizer = optim.AdamW(
-        trainable_param_list,
-        lr=args.lr,
-        weight_decay=args.weight_decay,
-    )
     if args.epochs <= 0:
         raise RuntimeError("--epochs must be > 0 for baseline training.")
-    scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs)
+    if args.model == "simple_cnn":
+        optimizer = optim.Adadelta(trainable_param_list, lr=args.lr)
+        scheduler = StepLR(optimizer, step_size=1, gamma=args.gamma)
+    else:
+        optimizer = optim.AdamW(
+            trainable_param_list,
+            lr=args.lr,
+            weight_decay=args.weight_decay,
+        )
+        scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs)
 
     running_stats: Dict[str, float] = {}
     best_validation_accuracy = float("-inf")

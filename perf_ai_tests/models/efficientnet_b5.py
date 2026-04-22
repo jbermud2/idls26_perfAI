@@ -4,6 +4,7 @@ import torch.nn as nn
 from torchvision.models import efficientnet_b5
 
 from .efficientnet_common import (
+    EfficientNetPAI,
     NUM_CLASSES,
     PAI_CONVERT_TARGETS,
     build_transforms_for_model,
@@ -78,6 +79,8 @@ def build_transforms_efficientnet_b5():
 def _register_efficientnet_b5() -> ModelBuildConfig:
     return ModelBuildConfig(
         build_model=efficientnet_b5_flowers102,
+        wrap_model=EfficientNetPAI,
+        num_classes=NUM_CLASSES,
         build_transforms=build_transforms_efficientnet_b5,
         pai_convert_targets=PAI_CONVERT_TARGETS,
         optimizer_trainable_submodules=("pre_fc", "classifier_fc"),

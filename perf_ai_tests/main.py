@@ -21,8 +21,7 @@ import json
 
 import torch
 
-from data.registry import get_dataset_builder
-from models import EfficientNetPAI, NUM_CLASSES
+from data.registry import get_dataset_builder, list_dataset_names
 from models.registry import get_model_build_config, list_model_build_config_names
 from trainer.eval import test
 from trainer.train import train
@@ -68,7 +67,7 @@ except ImportError:
 
 FLOWERS_DATASET_ROOT_DEFAULT = "/ocean/projects/cis260045p/shared/data"
 DEFAULT_PAI_CONVERT_TARGET = "pre_fc"
-DATASET_REGISTRY_NAME = "flowers102"
+DEFAULT_DATASET_NAME = "flowers102"
 DEFAULT_MODEL_NAME = "efficientnet_b4"
 
 
@@ -97,8 +96,9 @@ def main():
     parser.add_argument("--data-root", type=str, default=FLOWERS_DATASET_ROOT_DEFAULT)
     parser.add_argument("--no-download", action="store_true", default=False)
     parser.add_argument("--num-workers", type=int, default=model_defaults.get("num_workers", 4), metavar="N")
+    parser.add_argument("--dataset", type=str, default=DEFAULT_DATASET_NAME, choices=list_dataset_names())
     parser.add_argument("--use-wandb", action="store_true", default=False)
-    parser.add_argument("--wandb-project", type=str, default=f"{DEFAULT_MODEL_NAME}_{DATASET_REGISTRY_NAME}")
+    parser.add_argument("--wandb-project", type=str, default=f"{DEFAULT_MODEL_NAME}_{DEFAULT_DATASET_NAME}")
     parser.add_argument("--wandb-entity", type=str, default="PerforatedAI_IDL")
     parser.add_argument("--wandb-run-name", type=str, default="Normal Gradient Decent")
     parser.add_argument("--wandb-mode", type=str, default="online", choices=["online", "offline", "disabled"])
@@ -113,7 +113,8 @@ def main():
     parser.add_argument("--pai-forward-function", type=str, default="relu", choices=["relu", "sigmoid", "tanh"])
     parser.add_argument("--pai-convert-target", type=str, default=DEFAULT_PAI_CONVERT_TARGET, choices=["pre_fc", "classifier_fc"])
     parser.add_argument("--perforated-load-path", type=str)
-    parser.add_argument("--pai-save-name", type=str, default=f"artifacts_{DEFAULT_MODEL_NAME.lower()}_{DATASET_REGISTRY_NAME.lower()}")
+    parser.add_argument("--gamma", type=float, default=model_defaults.get("gamma", 0.7), metavar="M")
+    parser.add_argument("--pai-save-name", type=str, default=f"artifacts_{DEFAULT_MODEL_NAME.lower()}_{DEFAULT_DATASET_NAME.lower()}")
     parser.add_argument("--strict-unwrapped-check", action="store_true", default=False)
     parser.add_argument("--strict-weight-decay-check", action="store_true", default=False)
     parser.add_argument("--force-stop-epochs", default=True, action=argparse.BooleanOptionalAction, help="Stops the training after the number mentioned in --epochs flag else it will train until PAI signals to stop")
@@ -121,14 +122,15 @@ def main():
 
     args = parser.parse_args()
     model_config = get_model_build_config(args.model)
+    dataset_name = args.dataset
 
-    default_wandb_project = f"{DEFAULT_MODEL_NAME}_{DATASET_REGISTRY_NAME}"
+    default_wandb_project = f"{DEFAULT_MODEL_NAME}_{DEFAULT_DATASET_NAME}"
     if args.wandb_project == default_wandb_project:
-        args.wandb_project = f"{args.model}_{DATASET_REGISTRY_NAME}"
+        args.wandb_project = f"{args.model}_{dataset_name}"
 
-    default_pai_save_name = f"artifacts_{DEFAULT_MODEL_NAME.lower()}_{DATASET_REGISTRY_NAME.lower()}"
+    default_pai_save_name = f"artifacts_{DEFAULT_MODEL_NAME.lower()}_{DEFAULT_DATASET_NAME.lower()}"
     if args.pai_save_name == default_pai_save_name:
-        args.pai_save_name = f"artifacts_{args.model.lower()}_{DATASET_REGISTRY_NAME.lower()}"
+        args.pai_save_name = f"artifacts_{args.model.lower()}_{dataset_name.lower()}"
 
     if GPA is None or UPA is None:
         raise ImportError(
@@ -162,9 +164,9 @@ def main():
     set_seed(args.seed)
 
     download = not args.no_download
-    print(f"Preparing the following dataset: {DATASET_REGISTRY_NAME}")
+    print(f"Preparing the following dataset: {dataset_name}")
     train_transform, val_transform, test_transform, crop_size = model_config.build_transforms()
-    dataset_builder = get_dataset_builder(DATASET_REGISTRY_NAME)
+    dataset_builder = get_dataset_builder(dataset_name)
     train_dataset, val_dataset, test_dataset = dataset_builder(
         data_root=args.data_root,
         train_transform=train_transform,
@@ -214,8 +216,8 @@ def main():
     )
     print("Prepared Dataloaders")
     
-    base_model = model_config.build_model(num_classes=NUM_CLASSES, finetune_backbone=args.finetune_backbone)
-    model = EfficientNetPAI(base_model)
+    base_model = model_config.build_model(num_classes=model_config.num_classes, finetune_backbone=args.finetune_backbone)
+    model = model_config.wrap_model(base_model)
     print(f"Loaded the following model: {args.model}")
 
     configure_pai(args, model)

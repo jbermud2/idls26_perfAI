@@ -8,6 +8,12 @@ import torch.optim as optim
 # from utils.ddp_utils import fill_missing_parameter_gradients
 
 
+def _classification_loss(model: nn.Module, output: torch.Tensor, target: torch.Tensor):
+    if getattr(model, "uses_log_softmax", False):
+        return F.nll_loss(output, target)
+    return F.cross_entropy(output, target, label_smoothing=0.1)
+
+
 def train(
     args,
     model: nn.Module,
@@ -29,7 +35,7 @@ def train(
         optimizer.zero_grad()
         # fill_missing_parameter_gradients(model)
         output = model(data)
-        loss = F.cross_entropy(output, target, label_smoothing=0.1)
+        loss = _classification_loss(model, output, target)
         loss.backward()
         optimizer.step()
 

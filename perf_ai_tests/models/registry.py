@@ -11,6 +11,12 @@ class ModelBuildConfig:
     build_model: Callable[[int, bool], nn.Module]
     """(num_classes, finetune_backbone) -> module passed to perforate_model."""
 
+    wrap_model: Callable[[nn.Module], nn.Module]
+    """Wraps the base model with any PAI-specific modules before training."""
+
+    num_classes: int
+    """Number of output classes for the configured dataset."""
+
     build_transforms: Callable[[], Tuple[object, object, object, int]]
     """Returns train_transform, val_transform, test_transform, crop_size."""
 
@@ -52,6 +58,7 @@ def list_model_build_config_names() -> Tuple[str, ...]:
 def _import_builtin_model_modules():
     import models.efficientnet_b4 as _efficientnet_b4
     import models.efficientnet_b5 as _efficientnet_b5
+    import models.simple_cnn as _simple_cnn
 
 
 _import_builtin_model_modules()
