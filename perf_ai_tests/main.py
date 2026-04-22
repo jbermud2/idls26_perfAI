@@ -116,7 +116,7 @@ def main():
     parser.add_argument("--pai-save-name", type=str, default=f"artifacts_{DEFAULT_MODEL_NAME.lower()}_{DATASET_REGISTRY_NAME.lower()}")
     parser.add_argument("--strict-unwrapped-check", action="store_true", default=False)
     parser.add_argument("--strict-weight-decay-check", action="store_true", default=False)
-    parser.add_argument("--force-stop-epochs", default=False, action=argparse.BooleanOptionalAction, help="Stops the training after the number mentioned in --epochs flag else it will train until PAI signals to stop")
+    parser.add_argument("--force-stop-epochs", default=True, action=argparse.BooleanOptionalAction, help="Stops the training after the number mentioned in --epochs flag else it will train until PAI signals to stop")
     parser.add_argument("--gpu", type=int, default=0, metavar="N", help="CUDA device index when CUDA is used (single GPU). Ignored with --no-cuda.")
 
     args = parser.parse_args()
