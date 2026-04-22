@@ -6,7 +6,7 @@ interact -p GPU-shared --gres=gpu:h100-80:1 -t 8:00:00 -A cis260045p
 
 python -m torch.distributed.run --nproc_per_node 2 main.py --data-root /ocean/projects/cis260045p/shared/data --use-wandb --wandb-api-key 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 --dendrite-mode 1 --max-dendrites 5 --pai-forward-function relu --improvement-threshold 0.5 --candidate-weight-init-mult 0.1 --epochs 40 --batch-size 256 > output.txt 2>&1
 
-python main.py --data-root /ocean/projects/cis260045p/shared/data --use-wandb --wandb-api-key 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 --dendrite-mode 1 --max-dendrites 4 --pai-forward-function relu --improvement-threshold 1 --candidate-weight-init-mult 0.1 > output.txt 2>&1
+python main.py --data-root /ocean/projects/cis260045p/shared/data --use-wandb --wandb-api-key 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 --dendrite-mode 1 --max-dendrites 4 --pai-forward-function relu --improvement-threshold 1 --candidate-weight-init-mult 0.1 --model efficientnet_b4 > output.txt 2>&1
 
 '''
 
@@ -22,7 +22,8 @@ import json
 import torch
 
 from data.registry import get_dataset_builder
-from models import EfficientNetB5PAI, NUM_CLASSES, build_transforms, efficientnet_b5_flowers102
+from models import EfficientNetPAI, NUM_CLASSES
+from models.registry import get_model_build_config, list_model_build_config_names
 from trainer.eval import test
 from trainer.train import train
 from utils.generic_utils import (
@@ -68,19 +69,26 @@ except ImportError:
 FLOWERS_DATASET_ROOT_DEFAULT = "/ocean/projects/cis260045p/shared/data"
 DEFAULT_PAI_CONVERT_TARGET = "pre_fc"
 DATASET_REGISTRY_NAME = "flowers102"
-MODEL_NAME = "efficientnet_b5"
+DEFAULT_MODEL_NAME = "efficientnet_b4"
 
 
 def main():
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument("--model", type=str, default=DEFAULT_MODEL_NAME, choices=list_model_build_config_names())
+    pre_args, _ = pre_parser.parse_known_args()
+    pre_model_config = get_model_build_config(pre_args.model)
+    model_defaults = dict(pre_model_config.pai_arg_defaults)
+
     parser = argparse.ArgumentParser(
         description="PyTorch transfer learning with EfficientNet-B5 + PerforatedAI (No DDP)."
     )
-    parser.add_argument("--batch-size", type=int, default=16, metavar="N")
-    parser.add_argument("--test-batch-size", type=int, default=128, metavar="N")
-    parser.add_argument("--epochs", type=int, default=100, metavar="N")
-    parser.add_argument("--lr", type=float, default=6e-5, metavar="LR")
-    parser.add_argument("--weight-decay", type=float, default=4e-3, metavar="WD")
-    parser.add_argument("--finetune-backbone", action="store_true", default=True)
+    parser.add_argument("--batch-size", type=int, default=model_defaults.get("batch_size", 16), metavar="N")
+    parser.add_argument("--test-batch-size", type=int, default=model_defaults.get("test_batch_size", 128), metavar="N")
+    parser.add_argument("--epochs", type=int, default=model_defaults.get("epochs", 50), metavar="N")
+    parser.add_argument("--model", type=str, default=pre_args.model, choices=list_model_build_config_names())
+    parser.add_argument("--lr", type=float, default=model_defaults.get("lr", 6e-5), metavar="LR")
+    parser.add_argument("--weight-decay", type=float, default=model_defaults.get("weight_decay", 4e-3), metavar="WD")
+    parser.add_argument("--finetune-backbone", action="store_true", default=model_defaults.get("finetune_backbone", True))
     parser.add_argument("--no-cuda", action="store_true", default=False)
     parser.add_argument("--no-mps", action="store_true", default=False)
     parser.add_argument("--dry-run", action="store_true", default=False)
@@ -88,9 +96,9 @@ def main():
     parser.add_argument("--log-interval", type=int, default=10, metavar="N")
     parser.add_argument("--data-root", type=str, default=FLOWERS_DATASET_ROOT_DEFAULT)
     parser.add_argument("--no-download", action="store_true", default=False)
-    parser.add_argument("--num-workers", type=int, default=4, metavar="N")
+    parser.add_argument("--num-workers", type=int, default=model_defaults.get("num_workers", 4), metavar="N")
     parser.add_argument("--use-wandb", action="store_true", default=False)
-    parser.add_argument("--wandb-project", type=str, default=f"{MODEL_NAME}_{DATASET_REGISTRY_NAME}")
+    parser.add_argument("--wandb-project", type=str, default=f"{DEFAULT_MODEL_NAME}_{DATASET_REGISTRY_NAME}")
     parser.add_argument("--wandb-entity", type=str, default="PerforatedAI_IDL")
     parser.add_argument("--wandb-run-name", type=str, default="Normal Gradient Decent")
     parser.add_argument("--wandb-mode", type=str, default="online", choices=["online", "offline", "disabled"])
@@ -105,13 +113,22 @@ def main():
     parser.add_argument("--pai-forward-function", type=str, default="relu", choices=["relu", "sigmoid", "tanh"])
     parser.add_argument("--pai-convert-target", type=str, default=DEFAULT_PAI_CONVERT_TARGET, choices=["pre_fc", "classifier_fc"])
     parser.add_argument("--perforated-load-path", type=str)
-    parser.add_argument("--pai-save-name", type=str, default=f"artifacts_{MODEL_NAME.lower()}_{DATASET_REGISTRY_NAME.lower()}")
+    parser.add_argument("--pai-save-name", type=str, default=f"artifacts_{DEFAULT_MODEL_NAME.lower()}_{DATASET_REGISTRY_NAME.lower()}")
     parser.add_argument("--strict-unwrapped-check", action="store_true", default=False)
     parser.add_argument("--strict-weight-decay-check", action="store_true", default=False)
     parser.add_argument("--force-stop-epochs", default=False, action=argparse.BooleanOptionalAction, help="Stops the training after the number mentioned in --epochs flag else it will train until PAI signals to stop")
     parser.add_argument("--gpu", type=int, default=0, metavar="N", help="CUDA device index when CUDA is used (single GPU). Ignored with --no-cuda.")
 
     args = parser.parse_args()
+    model_config = get_model_build_config(args.model)
+
+    default_wandb_project = f"{DEFAULT_MODEL_NAME}_{DATASET_REGISTRY_NAME}"
+    if args.wandb_project == default_wandb_project:
+        args.wandb_project = f"{args.model}_{DATASET_REGISTRY_NAME}"
+
+    default_pai_save_name = f"artifacts_{DEFAULT_MODEL_NAME.lower()}_{DATASET_REGISTRY_NAME.lower()}"
+    if args.pai_save_name == default_pai_save_name:
+        args.pai_save_name = f"artifacts_{args.model.lower()}_{DATASET_REGISTRY_NAME.lower()}"
 
     if GPA is None or UPA is None:
         raise ImportError(
@@ -146,7 +163,7 @@ def main():
 
     download = not args.no_download
     print(f"Preparing the following dataset: {DATASET_REGISTRY_NAME}")
-    train_transform, val_transform, test_transform, crop_size = build_transforms()
+    train_transform, val_transform, test_transform, crop_size = model_config.build_transforms()
     dataset_builder = get_dataset_builder(DATASET_REGISTRY_NAME)
     train_dataset, val_dataset, test_dataset = dataset_builder(
         data_root=args.data_root,
@@ -197,9 +214,9 @@ def main():
     )
     print("Prepared Dataloaders")
     
-    base_model = efficientnet_b5_flowers102(num_classes=NUM_CLASSES, finetune_backbone=args.finetune_backbone)
-    model = EfficientNetB5PAI(base_model)
-    print(f"Loaded the following model: {MODEL_NAME}")
+    base_model = model_config.build_model(num_classes=NUM_CLASSES, finetune_backbone=args.finetune_backbone)
+    model = EfficientNetPAI(base_model)
+    print(f"Loaded the following model: {args.model}")
 
     configure_pai(args, model)
     
