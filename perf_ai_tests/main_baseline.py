@@ -26,7 +26,7 @@ from utils.metrics_utils import (
     safe_number,
     update_min_max,
 )
-from utils.wandb_utils import finish_wandb, init_wandb, log_to_wandb
+from utils.wandb_utils import finish_wandb, init_wandb, log_checkpoint_artifact, log_to_wandb
 
 
 FLOWERS_DATASET_ROOT_DEFAULT = "/ocean/projects/cis260045p/shared/data"
@@ -335,6 +335,14 @@ def main():
     print(f"Final performance metrics:\n{json.dumps(final_metrics, indent=3)}")
 
     torch.save(model.state_dict(), os.path.join(args.save_dir, "final_model_state_dict.pt"))
+
+    if run is not None and os.path.exists(os.path.join(args.save_dir, "best_model.pt")):
+        log_checkpoint_artifact(
+            run,
+            f"{args.save_dir}-best",
+            os.path.join(args.save_dir, "best_model.pt"),
+            aliases=["best"],
+        )
 
     if run is not None:
         log_to_wandb(run, final_metrics)
