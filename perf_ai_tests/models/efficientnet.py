@@ -67,10 +67,13 @@ class EfficientNetB5PAI(nn.Module):
 
         fc_in_features = efficientnet_model.classifier[1].in_features
         self.pre_fc = nn.Linear(fc_in_features, fc_in_features)
+        self.pre_fc_dropout = nn.Dropout(p=0.4)
 
         self.classifier_dropout = efficientnet_model.classifier[0]
         if hasattr(self.classifier_dropout, "inplace"):
             self.classifier_dropout.inplace = False
+        if hasattr(self.classifier_dropout, "p"):
+            self.classifier_dropout.p = max(float(self.classifier_dropout.p), 0.5)
         self.classifier_fc = efficientnet_model.classifier[1]
 
     def forward(self, x: torch.Tensor):
@@ -79,6 +82,7 @@ class EfficientNetB5PAI(nn.Module):
         x = torch.flatten(x, 1)
         x = self.pre_fc(x)
         x = F.relu(x, inplace=False)
+        x = self.pre_fc_dropout(x)
         x = self.classifier_dropout(x)
         x = self.classifier_fc(x)
         return x
@@ -114,10 +118,20 @@ def build_transforms():
 
     train_transform = transforms.Compose(
         [
-            transforms.RandomResizedCrop(crop_size),
+            transforms.RandomResizedCrop(crop_size, scale=(0.6, 1.0), ratio=(0.75, 1.33)),
             transforms.RandomHorizontalFlip(),
+            transforms.RandomVerticalFlip(p=0.1),
+            transforms.RandomRotation(15),
+            transforms.ColorJitter(
+                brightness=0.3,
+                contrast=0.3,
+                saturation=0.3,
+                hue=0.05,
+            ),
+            transforms.RandAugment(num_ops=2, magnitude=9),
             transforms.ToTensor(),
             transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
+            transforms.RandomErasing(p=0.25, scale=(0.02, 0.15), ratio=(0.3, 3.3), value="random"),
         ]
     )
 
