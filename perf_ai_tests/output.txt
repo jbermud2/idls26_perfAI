@@ -11326,3 +11326,176 @@ Epoch 6 Metrics:
    "val/epoch_at_best_validation": 6
 }
 saving system latest
+Train Epoch: 7 [0/1020 (0%)]	Loss: 2.579560
+Train Epoch: 7 [160/1020 (16%)]	Loss: 2.019182
+Train Epoch: 7 [320/1020 (31%)]	Loss: 1.688581
+Train Epoch: 7 [480/1020 (47%)]	Loss: 1.827174
+Train Epoch: 7 [640/1020 (62%)]	Loss: 2.030594
+Train Epoch: 7 [800/1020 (78%)]	Loss: 2.143903
+Train Epoch: 7 [960/1020 (94%)]	Loss: 2.455243
+
+Validation set: loss=1.0766, top-1=81.27%, top-5=96.18%
+
+Test set: loss=1.1916, top-1=78.91%, top-5=94.49%
+
+Adding extra score train of 63.92156862745098
+Adding extra score train_top5 of 88.13725490196079
+Adding validation score 81.27450980
+
+
+Got score of 81.2745098039 (average 81.27450980392157, *0.999=81.19323529411766) which is higher than 80.2941176471 by 1e-05 so setting epoch to 6
+
+
+2 epoch improved is 6
+This also beats global best of 80.29411764705883 so saving
+saving system best_model
+saving system latest
+Checking PAI switch with mode n, switch mode DOING_FIXED_SWITCH, epoch 6, last improved epoch 6, total epochs 6, n: 12, num_cycles: 0
+=== LR Optimization Check ===
+  mode == "n": True
+  get_learn_dendrites_live(): False
+  committed_to_initial_rate: True
+  get_dont_give_up_unless_learning_rate_lowered(): False
+  current_n_learning_rate_initial_skip_steps: 0
+  last_max_learning_rate_steps: 6
+  skip_steps < max_steps: True
+  scheduler is not None: True
+=============================
+Returning False - no triggers to switch have been hit
+Incrementing scheduler to count 6
+Checking if at last with scores 0, count since switch 6 and last total lr step count -1
+At last count False with count 6 and last LR count -1
+Learning rate just stepped to 5.7893294577e-05 with 6 total steps
+6 steps is the max of the last switch mode
+Learning rates were 5.85316955e-05 and 5.78932946e-05 started with 0, and is now at 6 committed True then either this (non zero) or eventually comparing to 6 steps or rate 0.00005853
+Setting last max steps to 6 and lr 5.85316954888546e-05
+Completed adding score. Restructured is 0, 
+current switch list is:
+[]
+Restructured status: 0
+Training complete status: False
+saving system best_model
+Epoch 7 Metrics:
+{
+   "epoch": 7,
+   "train/accuracy": 63.92156862745098,
+   "train/top5_accuracy": 88.13725490196079,
+   "train/loss": 2.127857524273442,
+   "val/accuracy": 81.27450980392157,
+   "val/loss": 1.0765738992130056,
+   "val/accuracy_min": 12.156862745098039,
+   "val/accuracy_max": 81.27450980392157,
+   "val/top5_accuracy": 96.17647058823529,
+   "val/top5_min": 31.274509803921568,
+   "val/top5_max": 96.17647058823529,
+   "test/loss": 1.1916075844234675,
+   "test/accuracy": 78.90713937225566,
+   "test/accuracy_min": 9.237274353553424,
+   "test/accuracy_max": 78.90713937225566,
+   "test/top5_accuracy": 94.48690844039682,
+   "test/top5_min": 27.744348674581232,
+   "test/top5_max": 94.48690844039682,
+   "test/precision_at_1": 78.90713937225566,
+   "seconds_per_training_epoch": 43.84068343599938,
+   "seconds_per_training_cycle": 312.9618584349955,
+   "learning_rate": 5.7893294576647535e-05,
+   "model/num_parameters": 20944558,
+   "model/trainable_parameters": 20944558,
+   "model/flops": 4662474224.0,
+   "model/flops_source": "fvcore",
+   "perforatedai/dendrite_count": 0,
+   "val/test_accuracy_at_best_validation": 78.90713937225566,
+   "val/test_top5_at_best_validation": 94.48690844039682,
+   "val/epoch_at_best_validation": 7
+}
+saving system latest
+Train Epoch: 8 [0/1020 (0%)]	Loss: 1.782590
+Train Epoch: 8 [160/1020 (16%)]	Loss: 2.117248
+Train Epoch: 8 [320/1020 (31%)]	Loss: 1.696624
+Train Epoch: 8 [480/1020 (47%)]	Loss: 1.870842
+Train Epoch: 8 [640/1020 (62%)]	Loss: 1.819673
+Train Epoch: 8 [800/1020 (78%)]	Loss: 1.809067
+Train Epoch: 8 [960/1020 (94%)]	Loss: 2.349895
+
+Validation set: loss=0.8907, top-1=84.31%, top-5=97.25%
+
+Test set: loss=0.9988, top-1=81.70%, top-5=95.32%
+
+Adding extra score train of 66.66666666666667
+Adding extra score train_top5 of 91.66666666666667
+Adding validation score 84.31372549
+
+
+Got score of 84.3137254902 (average 84.31372549019608, *0.999=84.22941176470589) which is higher than 81.2745098039 by 1e-05 so setting epoch to 7
+
+
+2 epoch improved is 7
+This also beats global best of 81.27450980392157 so saving
+saving system best_model
+saving system latest
+Checking PAI switch with mode n, switch mode DOING_FIXED_SWITCH, epoch 7, last improved epoch 7, total epochs 7, n: 12, num_cycles: 0
+=== LR Optimization Check ===
+  mode == "n": True
+  get_learn_dendrites_live(): False
+  committed_to_initial_rate: True
+  get_dont_give_up_unless_learning_rate_lowered(): False
+  current_n_learning_rate_initial_skip_steps: 0
+  last_max_learning_rate_steps: 7
+  skip_steps < max_steps: True
+  scheduler is not None: True
+=============================
+Returning False - no triggers to switch have been hit
+Incrementing scheduler to count 7
+Checking if at last with scores 0, count since switch 7 and last total lr step count -1
+At last count False with count 7 and last LR count -1
+Learning rate just stepped to 5.7144811574e-05 with 7 total steps
+7 steps is the max of the last switch mode
+Learning rates were 5.78932946e-05 and 5.71448116e-05 started with 0, and is now at 7 committed True then either this (non zero) or eventually comparing to 7 steps or rate 0.00005789
+Setting last max steps to 7 and lr 5.7893294576647535e-05
+Completed adding score. Restructured is 0, 
+current switch list is:
+[]
+Restructured status: 0
+Training complete status: False
+saving system best_model
+Epoch 8 Metrics:
+{
+   "epoch": 8,
+   "train/accuracy": 66.66666666666667,
+   "train/top5_accuracy": 91.66666666666667,
+   "train/loss": 1.9621962112538955,
+   "val/accuracy": 84.31372549019608,
+   "val/loss": 0.8907300911697686,
+   "val/accuracy_min": 12.156862745098039,
+   "val/accuracy_max": 84.31372549019608,
+   "val/top5_accuracy": 97.25490196078431,
+   "val/top5_min": 31.274509803921568,
+   "val/top5_max": 97.25490196078431,
+   "test/loss": 0.9988254547739518,
+   "test/accuracy": 81.70434216945844,
+   "test/accuracy_min": 9.237274353553424,
+   "test/accuracy_max": 81.70434216945844,
+   "test/top5_accuracy": 95.31631159538136,
+   "test/top5_min": 27.744348674581232,
+   "test/top5_max": 95.31631159538136,
+   "test/precision_at_1": 81.70434216945844,
+   "seconds_per_training_epoch": 44.20857990899822,
+   "seconds_per_training_cycle": 357.7523891429955,
+   "learning_rate": 5.7144811573980586e-05,
+   "model/num_parameters": 20944558,
+   "model/trainable_parameters": 20944558,
+   "model/flops": 4662474224.0,
+   "model/flops_source": "fvcore",
+   "perforatedai/dendrite_count": 0,
+   "val/test_accuracy_at_best_validation": 81.70434216945844,
+   "val/test_top5_at_best_validation": 95.31631159538136,
+   "val/epoch_at_best_validation": 8
+}
+saving system latest
+Train Epoch: 9 [0/1020 (0%)]	Loss: 1.743659
+Train Epoch: 9 [160/1020 (16%)]	Loss: 1.599908
+Train Epoch: 9 [320/1020 (31%)]	Loss: 1.513543
+Train Epoch: 9 [480/1020 (47%)]	Loss: 1.917945
+Train Epoch: 9 [640/1020 (62%)]	Loss: 2.260476
+Train Epoch: 9 [800/1020 (78%)]	Loss: 1.795083
+Train Epoch: 9 [960/1020 (94%)]	Loss: 1.702292
