@@ -2419,15 +2419,18 @@ class PAINeuronModuleTracker:
 
         # Add point at epoch last improved and best validation score
         if GPA.pc.get_drawing_pai():
+            best_epoch_idx = self.member_vars["epoch_last_improved"]
+            if len(accuracies) > 0:
+                best_epoch_idx = max(0, min(best_epoch_idx, len(accuracies) - 1))
             ax.plot(
-                self.member_vars["epoch_last_improved"],
+                best_epoch_idx,
                 self.member_vars["global_best_validation_score"],
                 "bo",
                 label="Global best (y)",
             )
             ax.plot(
-                self.member_vars["epoch_last_improved"],
-                accuracies[self.member_vars["epoch_last_improved"]],
+                best_epoch_idx,
+                accuracies[best_epoch_idx],
                 "go",
                 label="Epoch Last Improved",
             )
@@ -2894,14 +2897,24 @@ class PAINeuronModuleTracker:
                 start_index = self.member_vars["switch_epochs"][switch - 1] + 1
             end_index = self.member_vars["switch_epochs"][switch] + 1
 
+            # Guard against switch boundaries that do not map to a non-empty
+            # accuracy window yet (can happen around mode switches/restructures).
+            accuracies_len = len(self.member_vars["accuracies"])
+            if accuracies_len == 0:
+                continue
+            start_index = max(0, min(start_index, accuracies_len))
+            end_index = max(start_index, min(end_index, accuracies_len))
+            if end_index <= start_index:
+                continue
+
+            window = self.member_vars["accuracies"][start_index:end_index]
+            if len(window) == 0:
+                continue
+
             if GPA.pai_tracker.member_vars["maximizing_score"]:
-                best_valid_index = start_index + np.argmax(
-                    self.member_vars["accuracies"][start_index:end_index]
-                )
+                best_valid_index = start_index + np.argmax(window)
             else:
-                best_valid_index = start_index + np.argmin(
-                    self.member_vars["accuracies"][start_index:end_index]
-                )
+                best_valid_index = start_index + np.argmin(window)
 
             best_valid_score = self.member_vars["accuracies"][best_valid_index]
             best_valid.append(best_valid_score)
@@ -2925,9 +2938,17 @@ class PAINeuronModuleTracker:
                     best_extra_scores[score_name].append(None)
             
             if self.member_vars["doing_pai"]:
-                associated_params.append(self.member_vars["param_counts"][switch])
+                if switch < len(self.member_vars["param_counts"]):
+                    associated_params.append(self.member_vars["param_counts"][switch])
+                elif len(self.member_vars["param_counts"]) > 0:
+                    associated_params.append(self.member_vars["param_counts"][-1])
+                else:
+                    associated_params.append(None)
             else:
-                associated_params.append(self.member_vars["param_counts"][-1])
+                if len(self.member_vars["param_counts"]) > 0:
+                    associated_params.append(self.member_vars["param_counts"][-1])
+                else:
+                    associated_params.append(None)
 
         # If in neuron training mode but not the very first epoch
         if self.member_vars["mode"] == "n" and (
@@ -2941,37 +2962,43 @@ class PAINeuronModuleTracker:
             if len(self.member_vars["switch_epochs"]) != 0:
                 start_index = self.member_vars["switch_epochs"][-1] + 1
 
-            if GPA.pai_tracker.member_vars["maximizing_score"]:
-                best_valid_index = start_index + np.argmax(
-                    self.member_vars["accuracies"][start_index:]
-                )
-            else:
-                best_valid_index = start_index + np.argmin(
-                    self.member_vars["accuracies"][start_index:]
-                )
+            accuracies_len = len(self.member_vars["accuracies"])
+            start_index = max(0, min(start_index, accuracies_len))
+            tail_window = self.member_vars["accuracies"][start_index:]
+            if len(tail_window) == 0:
+                tail_window = None
 
-            best_valid_score = self.member_vars["accuracies"][best_valid_index]
-            best_valid.append(best_valid_score)
+            if tail_window is not None:
+                if GPA.pai_tracker.member_vars["maximizing_score"]:
+                    best_valid_index = start_index + np.argmax(tail_window)
+                else:
+                    best_valid_index = start_index + np.argmin(tail_window)
+
+                best_valid_score = self.member_vars["accuracies"][best_valid_index]
+                best_valid.append(best_valid_score)
             
             # Get corresponding scores from all extra_scores
-            for score_name in self.member_vars["extra_scores"]:
-                if best_valid_index < len(self.member_vars["extra_scores"][score_name]):
-                    best_extra_scores[score_name].append(
-                        self.member_vars["extra_scores"][score_name][best_valid_index]
-                    )
-                else:
-                    best_extra_scores[score_name].append(None)
+                for score_name in self.member_vars["extra_scores"]:
+                    if best_valid_index < len(self.member_vars["extra_scores"][score_name]):
+                        best_extra_scores[score_name].append(
+                            self.member_vars["extra_scores"][score_name][best_valid_index]
+                        )
+                    else:
+                        best_extra_scores[score_name].append(None)
             
             # Get corresponding scores from all extra_scores_without_graphing
-            for score_name in self.member_vars["extra_scores_without_graphing"]:
-                if best_valid_index < len(self.member_vars["extra_scores_without_graphing"][score_name]):
-                    best_extra_scores[score_name].append(
-                        self.member_vars["extra_scores_without_graphing"][score_name][best_valid_index]
-                    )
+                for score_name in self.member_vars["extra_scores_without_graphing"]:
+                    if best_valid_index < len(self.member_vars["extra_scores_without_graphing"][score_name]):
+                        best_extra_scores[score_name].append(
+                            self.member_vars["extra_scores_without_graphing"][score_name][best_valid_index]
+                        )
+                    else:
+                        best_extra_scores[score_name].append(None)
+
+                if len(self.member_vars["param_counts"]) > 0:
+                    associated_params.append(self.member_vars["param_counts"][-1])
                 else:
-                    best_extra_scores[score_name].append(None)
-            
-            associated_params.append(self.member_vars["param_counts"][-1])
+                    associated_params.append(None)
 
         # Build dataframe with all columns
         csv_data = {
@@ -3380,7 +3407,7 @@ class PAINeuronModuleTracker:
 
         if restructuring_status_value == NETWORK_RESTRUCTURED:
             GPA.pai_tracker.member_vars["epoch_last_improved"] = (
-                GPA.pai_tracker.member_vars["num_epochs_run"]
+                max(GPA.pai_tracker.member_vars["num_epochs_run"] - 1, 0)
             )
             if GPA.pc.get_verbose():
                 print(

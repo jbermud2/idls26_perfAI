@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from typing import Dict, Optional
+from typing import Dict, Optional, Sequence
 
 try:
     import wandb
@@ -71,6 +71,25 @@ def log_to_wandb(run, metrics: Dict, step: Optional[int] = None):
     if run is None:
         return
     run.log(metrics, step=step)
+
+
+def log_checkpoint_artifact(
+    run,
+    artifact_name: str,
+    file_path: str,
+    aliases: Optional[Sequence[str]] = None,
+    artifact_type: str = "model",
+):
+    if run is None or wandb is None:
+        return
+    if not os.path.exists(file_path):
+        print(f"W&B checkpoint artifact not logged because file was not found: {file_path}")
+        return
+
+    artifact = wandb.Artifact(artifact_name, type=artifact_type)
+    artifact.add_file(file_path)
+    run.log_artifact(artifact, aliases=list(aliases) if aliases is not None else None)
+    print(f"Logged W&B artifact '{artifact_name}' from: {file_path}")
 
 
 def finish_wandb(run):

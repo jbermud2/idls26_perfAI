@@ -5,7 +5,7 @@ Creating the environment using the .yml:
 ```conda env create -f environment.yml --prefix /ocean/projects/cis260045p/shared/perf_ai```
 
 Activating the environment:
-```conda activate /ocean/projects/cis260045p/shared/perf_all```
+```conda activate /ocean/projects/cis260045p/shared/perf_ai```
 
 Location of MNIST:
 

@@ -29,7 +29,7 @@ def train(
         optimizer.zero_grad()
         # fill_missing_parameter_gradients(model)
         output = model(data)
-        loss = F.cross_entropy(output, target)
+        loss = F.cross_entropy(output, target, label_smoothing=0.1)
         loss.backward()
         optimizer.step()
 

@@ -20,6 +20,12 @@ class ModelBuildConfig:
     optimizer_trainable_submodules: Tuple[str, ...]
     """Submodule names to force trainable for PAI optimizer setup (when present)."""
 
+    pai_arg_defaults: Mapping[str, object]
+    """Default argparse values for main.py (PAI training) keyed by argparse dest names."""
+
+    baseline_arg_defaults: Mapping[str, object]
+    """Default argparse values for main_baseline.py keyed by argparse dest names."""
+
 
 MODEL_BUILD_CONFIGS: Dict[str, ModelBuildConfig] = {}
 
@@ -41,3 +47,11 @@ def get_model_build_config(name: str) -> ModelBuildConfig:
 
 def list_model_build_config_names() -> Tuple[str, ...]:
     return tuple(sorted(MODEL_BUILD_CONFIGS.keys()))
+
+
+def _import_builtin_model_modules():
+    import models.efficientnet_b4 as _efficientnet_b4
+    import models.efficientnet_b5 as _efficientnet_b5
+
+
+_import_builtin_model_modules()
