@@ -52,13 +52,13 @@ def configure_pai(args, model: torch.nn.Module):
     if hasattr(GPA.pc, "set_weight_decay_accepted") and not args.strict_weight_decay_check:
         GPA.pc.set_weight_decay_accepted(True)
     
-    GPA.pc.set_switch_mode(GPA.pc.DOING_HISTORY)
-    GPA.pc.set_n_epochs_to_switch(args.epochs//10)
+    #GPA.pc.set_switch_mode(GPA.pc.DOING_HISTORY)
+    #GPA.pc.set_n_epochs_to_switch(args.epochs//10)
 
-    #GPA.pc.set_switch_mode(GPA.pc.DOING_FIXED_SWITCH) 
-    #GPA.pc.set_fixed_switch_num(args.epochs//3) 
-    # GPA.pc.set_first_fixed_switch_num(args.epochs//2)
-
+    GPA.pc.set_switch_mode(GPA.pc.DOING_FIXED_SWITCH)
+    switch_interval = args.epochs // (args.max_dendrites + 1)
+    GPA.pc.set_fixed_switch_num(switch_interval)
+    GPA.pc.set_first_fixed_switch_num(switch_interval)
 
 
     if float(args.improvement_threshold).is_integer():
