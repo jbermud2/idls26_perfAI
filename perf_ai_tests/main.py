@@ -48,6 +48,7 @@ from utils.pai_utils import (
 from utils.wandb_utils import (
     finish_wandb, 
     init_wandb, 
+    log_checkpoint_artifact,
     log_to_wandb
 )
 
@@ -74,12 +75,12 @@ def main():
     parser = argparse.ArgumentParser(
         description="PyTorch transfer learning with EfficientNet-B5 + PerforatedAI (No DDP)."
     )
-    parser.add_argument("--batch-size", type=int, default=64, metavar="N")
+    parser.add_argument("--batch-size", type=int, default=16, metavar="N")
     parser.add_argument("--test-batch-size", type=int, default=128, metavar="N")
-    parser.add_argument("--epochs", type=int, default=200, metavar="N")
-    parser.add_argument("--lr", type=float, default=1e-4, metavar="LR")
-    parser.add_argument("--weight-decay", type=float, default=1e-4, metavar="WD")
-    parser.add_argument("--finetune-backbone", action="store_true", default=False)
+    parser.add_argument("--epochs", type=int, default=100, metavar="N")
+    parser.add_argument("--lr", type=float, default=6e-5, metavar="LR")
+    parser.add_argument("--weight-decay", type=float, default=4e-3, metavar="WD")
+    parser.add_argument("--finetune-backbone", action="store_true", default=True)
     parser.add_argument("--no-cuda", action="store_true", default=False)
     parser.add_argument("--no-mps", action="store_true", default=False)
     parser.add_argument("--dry-run", action="store_true", default=False)
@@ -292,6 +293,7 @@ def main():
                 "validation_top5_at_best_validation": validation_top5,
                 "epoch_at_best_validation": epoch,
             }
+            UPA.save_system(model, pai_system_name, "best_model")
 
         epoch_log: Dict[str, object] = {
             "epoch": epoch,
@@ -390,6 +392,14 @@ def main():
     print(f"Final performance metrics:\n{json.dumps(final_metrics, indent=3)}")
 
     UPA.save_system(model, pai_system_name, "final")
+    if run is not None:
+        if os.path.exists(os.path.join(pai_system_name, "best_model.pt")):
+            log_checkpoint_artifact(
+                run,
+                f"{pai_system_name}-best",
+                os.path.join(pai_system_name, "best_model.pt"),
+                aliases=["best"],
+            )
     pai_png_path = os.path.join(pai_system_name, f"{pai_system_name}.png")
     if os.path.exists(pai_png_path):
         if run is not None and wandb is not None:
