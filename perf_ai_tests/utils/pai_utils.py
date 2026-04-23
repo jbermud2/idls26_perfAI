@@ -33,7 +33,7 @@ def configure_pai(args, model: torch.nn.Module):
     convert_module_id = selected_convert_module_id(args)
 
     # TODO: Need to verify this with Rorry - In the meet he mentioned it will be an empty list anyway. But globals_perforatedai.py (688 - 694) has few items.
-    GPA.pc.set_module_names_to_perforate([])
+    # GPA.pc.set_module_names_to_perforate([])
     GPA.pc.set_module_ids_to_perforate([convert_module_id])
 
     ids_to_track = [f".{name}" for name, module in model.named_modules() if len(list(module.children())) == 0 and not name == convert_module_id.lstrip(".")]

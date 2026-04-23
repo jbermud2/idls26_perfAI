@@ -1,14 +1,7 @@
 '''
 For running:
-interact -p GPU-shared --gres=gpu:v100-32:1 -t 8:00:00 -A cis260045p
 
-interact -p GPU-shared --gres=gpu:h100-80:1 -t 8:00:00 -A cis260045p
-
-python -m torch.distributed.run --nproc_per_node 2 main.py --data-root /ocean/projects/cis260045p/shared/data --use-wandb --wandb-api-key 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 --dendrite-mode 1 --max-dendrites 5 --pai-forward-function relu --improvement-threshold 0.5 --candidate-weight-init-mult 0.1 --epochs 40 --batch-size 256 > output.txt 2>&1
-
-python /ocean/projects/cis260045p/jbermude/idls26_perfAI/perf_ai_tests/main.py --data-root /ocean/projects/cis260045p/shared/data --use-wandb --dendrite-mode 2 --max-dendrites 1 --epochs 100 --pai-forward-function relu --improvement-threshold 1 --candidate-weight-init-mult 0.1 --model efficientnet_b4 > output.txt 2>&1
-
-python /ocean/projects/cis260045p/jbermude/idls26_perfAI/perf_ai_tests/main.py --data-root /ocean/projects/cis260045p/shared/data --use-wandb --dendrite-mode 2 --max-dendrites 2 --pai-forward-function relu --improvement-threshold 1 --candidate-weight-init-mult 0.1 --model efficientnet_b4 2>&1 | tee output3.txt
+python /ocean/projects/cis260045p/jbermude/idls26_perfAI/perf_ai_tests/main.py --data-root /ocean/projects/cis260045p/shared/data --use-wandb --dendrite-mode 2 --max-dendrites 2 --pai-forward-function relu --improvement-threshold 1 --candidate-weight-init-mult 0.1 --model efficientnet_b4 2>&1 | tee output2.txt
 '''
 
 from __future__ import annotations
