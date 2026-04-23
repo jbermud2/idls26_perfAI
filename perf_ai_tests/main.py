@@ -6,8 +6,9 @@ interact -p GPU-shared --gres=gpu:h100-80:1 -t 8:00:00 -A cis260045p
 
 python -m torch.distributed.run --nproc_per_node 2 main.py --data-root /ocean/projects/cis260045p/shared/data --use-wandb --wandb-api-key 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 --dendrite-mode 1 --max-dendrites 5 --pai-forward-function relu --improvement-threshold 0.5 --candidate-weight-init-mult 0.1 --epochs 40 --batch-size 256 > output.txt 2>&1
 
-python main.py --data-root /ocean/projects/cis260045p/shared/data --use-wandb --wandb-api-key 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 --dendrite-mode 1 --max-dendrites 4 --pai-forward-function relu --improvement-threshold 1 --candidate-weight-init-mult 0.1 --model efficientnet_b4 > output.txt 2>&1
+python /ocean/projects/cis260045p/jbermude/idls26_perfAI/perf_ai_tests/main.py --data-root /ocean/projects/cis260045p/shared/data --use-wandb --dendrite-mode 2 --max-dendrites 1 --epochs 100 --pai-forward-function relu --improvement-threshold 1 --candidate-weight-init-mult 0.1 --model efficientnet_b4 > output.txt 2>&1
 
+python /ocean/projects/cis260045p/jbermude/idls26_perfAI/perf_ai_tests/main.py --data-root /ocean/projects/cis260045p/shared/data --use-wandb --dendrite-mode 2 --max-dendrites 2 --pai-forward-function relu --improvement-threshold 1 --candidate-weight-init-mult 0.1 --model efficientnet_b4 2>&1 | tee output3.txt
 '''
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ import time
 import shutil
 from typing import Dict
 import json
+import perforatedbp as UPB
 
 import torch
 
@@ -26,6 +28,8 @@ from models import EfficientNetPAI, NUM_CLASSES
 from models.registry import get_model_build_config, list_model_build_config_names
 from trainer.eval import test
 from trainer.train import train
+from dotenv import load_dotenv
+load_dotenv()
 from utils.generic_utils import (
     set_seed,
     disable_interactive_breakpoints,
@@ -61,6 +65,7 @@ except ImportError:
 try:
     from perforatedai import globals_perforatedai as GPA
     from perforatedai import utils_perforatedai as UPA
+    
 except ImportError:
     GPA = None
     UPA = None
@@ -100,7 +105,7 @@ def main():
     parser.add_argument("--use-wandb", action="store_true", default=False)
     parser.add_argument("--wandb-project", type=str, default=f"{DEFAULT_MODEL_NAME}_{DATASET_REGISTRY_NAME}")
     parser.add_argument("--wandb-entity", type=str, default="PerforatedAI_IDL")
-    parser.add_argument("--wandb-run-name", type=str, default="Normal Gradient Decent")
+    parser.add_argument("--wandb-run-name", type=str, default="PerforatedBP")
     parser.add_argument("--wandb-mode", type=str, default="online", choices=["online", "offline", "disabled"])
     parser.add_argument("--wandb-api-key", type=str, default="")
     parser.add_argument("--wandb-run-id", type=str, default="")
@@ -116,7 +121,7 @@ def main():
     parser.add_argument("--pai-save-name", type=str, default=f"artifacts_{DEFAULT_MODEL_NAME.lower()}_{DATASET_REGISTRY_NAME.lower()}")
     parser.add_argument("--strict-unwrapped-check", action="store_true", default=False)
     parser.add_argument("--strict-weight-decay-check", action="store_true", default=False)
-    parser.add_argument("--force-stop-epochs", default=False, action=argparse.BooleanOptionalAction, help="Stops the training after the number mentioned in --epochs flag else it will train until PAI signals to stop")
+    parser.add_argument("--force-stop-epochs", default=True, action=argparse.BooleanOptionalAction, help="Stops the training after the number mentioned in --epochs flag else it will train until PAI signals to stop")
     parser.add_argument("--gpu", type=int, default=0, metavar="N", help="CUDA device index when CUDA is used (single GPU). Ignored with --no-cuda.")
 
     args = parser.parse_args()

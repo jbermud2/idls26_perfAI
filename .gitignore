@@ -9,3 +9,5 @@ __pycache__/
 .DS_Store
 .ipynb_checkpoints/
 .env
+artifacts_efficientnet_b4_flowers102/
+artifacts_efficientnet_b5_flowers102/

@@ -100,6 +100,7 @@ def configure_pai(args, model: torch.nn.Module):
             elif args.dendrite_mode == 1:
                 print("Enabled Normal Gradient Descent Upgrades (No Perforated Backpropagation)")
             GPA.pc.set_perforated_backpropagation(args.dendrite_mode == 2)
+            
     
     print("Finished configuring PAI")
 
