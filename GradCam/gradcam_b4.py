@@ -1,3 +1,4 @@
+#test code for B4 modal
 """
 GradCAM visualization for all EfficientNet-B4 Flowers102 runs.
 Uses the WandB API to download checkpoints automatically — no manual downloads needed.
