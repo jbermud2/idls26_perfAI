@@ -1,4 +1,4 @@
-#python main_baseline.py --data-root /ocean/projects/cis260045p/shared/data --use-wandb --wandb-api-key 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
+#python main_baseline.py --data-root /ocean/projects/cis260045p/shared/data --use-wandb --wandb-api-key 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 --model efficientnet_b4 > output.txt 2>&1
 
 from __future__ import annotations
 
@@ -10,10 +10,10 @@ from typing import Dict
 
 import torch
 import torch.optim as optim
-from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim.lr_scheduler import CosineAnnealingLR, StepLR
 
-from data.registry import get_dataset_builder
-from models import NUM_CLASSES, build_transforms, efficientnet_b5_flowers102
+from data.registry import get_dataset_builder, list_dataset_names
+from models.registry import get_model_build_config, list_model_build_config_names
 from trainer.eval import test
 from trainer.train import train
 from utils.generic_utils import set_seed
@@ -30,20 +30,27 @@ from utils.wandb_utils import finish_wandb, init_wandb, log_checkpoint_artifact,
 
 
 FLOWERS_DATASET_ROOT_DEFAULT = "/ocean/projects/cis260045p/shared/data"
-DATASET_REGISTRY_NAME = "flowers102"
-MODEL_NAME = "efficientnet_b5"
+DEFAULT_DATASET_NAME = "flowers102"
+DEFAULT_MODEL_NAME = "efficientnet_b4"
 
 
 def main():
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument("--model", type=str, default=DEFAULT_MODEL_NAME, choices=list_model_build_config_names())
+    pre_args, _ = pre_parser.parse_known_args()
+    pre_model_config = get_model_build_config(pre_args.model)
+    model_defaults = dict(pre_model_config.baseline_arg_defaults)
+
     parser = argparse.ArgumentParser(
-        description="PyTorch transfer learning with plain EfficientNet-B5 (no PerforatedAI)."
+        description="PyTorch transfer learning with plain EfficientNet (no PerforatedAI)."
     )
-    parser.add_argument("--batch-size", type=int, default=64, metavar="N")
-    parser.add_argument("--test-batch-size", type=int, default=128, metavar="N")
-    parser.add_argument("--epochs", type=int, default=150, metavar="N")
-    parser.add_argument("--lr", type=float, default=1e-4, metavar="LR")
-    parser.add_argument("--weight-decay", type=float, default=1e-4, metavar="WD")
-    parser.add_argument("--finetune-backbone", action="store_true", default=False)
+    parser.add_argument("--batch-size", type=int, default=model_defaults.get("batch_size", 16), metavar="N")
+    parser.add_argument("--test-batch-size", type=int, default=model_defaults.get("test_batch_size", 128), metavar="N")
+    parser.add_argument("--epochs", type=int, default=model_defaults.get("epochs", 50), metavar="N")
+    parser.add_argument("--model", type=str, default=pre_args.model, choices=list_model_build_config_names())
+    parser.add_argument("--lr", type=float, default=model_defaults.get("lr", 6e-5), metavar="LR")
+    parser.add_argument("--weight-decay", type=float, default=model_defaults.get("weight_decay", 4e-3), metavar="WD")
+    parser.add_argument("--finetune-backbone", action="store_true", default=model_defaults.get("finetune_backbone", True))
     parser.add_argument("--no-cuda", action="store_true", default=False)
     parser.add_argument("--no-mps", action="store_true", default=False)
     parser.add_argument("--dry-run", action="store_true", default=False)
@@ -51,13 +58,15 @@ def main():
     parser.add_argument("--log-interval", type=int, default=10, metavar="N")
     parser.add_argument("--data-root", type=str, default=FLOWERS_DATASET_ROOT_DEFAULT)
     parser.add_argument("--no-download", action="store_true", default=False)
-    parser.add_argument("--num-workers", type=int, default=6, metavar="N")
-    parser.add_argument("--save-dir", type=str, default="artifacts_efficientnet_b5_flowers102_baseline")
+    parser.add_argument("--num-workers", type=int, default=model_defaults.get("num_workers", 4), metavar="N")
+    parser.add_argument("--dataset", type=str, default=DEFAULT_DATASET_NAME, choices=list_dataset_names())
+    parser.add_argument("--gamma", type=float, default=model_defaults.get("gamma", 0.7), metavar="M")
+    parser.add_argument("--save-dir", type=str, default=f"artifacts_{DEFAULT_MODEL_NAME}_{DEFAULT_DATASET_NAME}_baseline")
 
     parser.add_argument("--use-wandb", action="store_true", default=False)
-    parser.add_argument("--wandb-project", type=str, default=f"{MODEL_NAME}_{DATASET_REGISTRY_NAME}")
+    parser.add_argument("--wandb-project", type=str, default=f"{DEFAULT_MODEL_NAME}_{DEFAULT_DATASET_NAME}")
     parser.add_argument("--wandb-entity", type=str, default="PerforatedAI_IDL")
-    parser.add_argument("--wandb-run-name", type=str, default="EfficientNet-B5 Baseline")
+    parser.add_argument("--wandb-run-name", type=str, default="Normal Gradient Decent")
     parser.add_argument("--wandb-mode", type=str, default="online", choices=["online", "offline", "disabled"])
     parser.add_argument("--wandb-api-key", type=str, default="")
     parser.add_argument("--wandb-run-id", type=str, default="")
@@ -73,6 +82,16 @@ def main():
     )
 
     args = parser.parse_args()
+    model_config = get_model_build_config(args.model)
+    dataset_name = args.dataset
+
+    default_wandb_project = f"{DEFAULT_MODEL_NAME}_{DEFAULT_DATASET_NAME}"
+    if args.wandb_project == default_wandb_project:
+        args.wandb_project = f"{args.model}_{dataset_name}"
+
+    default_save_dir = f"artifacts_{DEFAULT_MODEL_NAME}_{DEFAULT_DATASET_NAME}_baseline"
+    if args.save_dir == default_save_dir:
+        args.save_dir = f"artifacts_{args.model}_{dataset_name}_baseline"
 
     use_mps = (not args.no_mps) and torch.backends.mps.is_available()
     use_cuda = (not args.no_cuda) and torch.cuda.is_available()
@@ -89,9 +108,9 @@ def main():
     set_seed(args.seed)
 
     download = not args.no_download
-    print(f"Preparing the following dataset: {DATASET_REGISTRY_NAME}")
-    train_transform, val_transform, test_transform, crop_size = build_transforms()
-    dataset_builder = get_dataset_builder(DATASET_REGISTRY_NAME)
+    print(f"Preparing the following dataset: {dataset_name}")
+    train_transform, val_transform, test_transform, crop_size = model_config.build_transforms()
+    dataset_builder = get_dataset_builder(dataset_name)
     train_dataset, val_dataset, test_dataset = dataset_builder(
         data_root=args.data_root,
         train_transform=train_transform,
@@ -146,11 +165,11 @@ def main():
     )
     print("Prepared Dataloaders")
 
-    model = efficientnet_b5_flowers102(
-        num_classes=NUM_CLASSES,
+    model = model_config.build_model(
+        num_classes=model_config.num_classes,
         finetune_backbone=args.finetune_backbone,
     )
-    print("Loaded plain EfficientNet-B5 baseline model")
+    print(f"Loaded plain {args.model} baseline model")
 
     total_params, trainable_params = count_parameters(model)
     print(f"Total parameters: {total_params:,}")
@@ -170,14 +189,18 @@ def main():
             "Enable trainable layers or run with --finetune-backbone."
         )
 
-    optimizer = optim.AdamW(
-        trainable_param_list,
-        lr=args.lr,
-        weight_decay=args.weight_decay,
-    )
     if args.epochs <= 0:
         raise RuntimeError("--epochs must be > 0 for baseline training.")
-    scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs)
+    if args.model == "simple_cnn":
+        optimizer = optim.Adadelta(trainable_param_list, lr=args.lr)
+        scheduler = StepLR(optimizer, step_size=1, gamma=args.gamma)
+    else:
+        optimizer = optim.AdamW(
+            trainable_param_list,
+            lr=args.lr,
+            weight_decay=args.weight_decay,
+        )
+        scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs)
 
     running_stats: Dict[str, float] = {}
     best_validation_accuracy = float("-inf")

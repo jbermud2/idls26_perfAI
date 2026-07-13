@@ -7,7 +7,7 @@ from typing import Dict, Tuple
 import torch
 import torch.nn as nn
 
-from models.efficientnet import DEFAULT_CROP_SIZE
+from models import DEFAULT_CROP_SIZE
 
 try:
     from fvcore.nn import FlopCountAnalysis

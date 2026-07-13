@@ -6,7 +6,7 @@ from typing import Optional
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
-from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim.lr_scheduler import CosineAnnealingLR, StepLR
 
 _FORWARD_FN_MAP = {
     "relu": F.relu,
@@ -105,8 +105,12 @@ def configure_pai(args, model: torch.nn.Module):
 
 
 def setup_pai_optimizer_scheduler(args, model: torch.nn.Module):
-    GPA.pai_tracker.set_optimizer(optim.AdamW)
-    GPA.pai_tracker.set_scheduler(CosineAnnealingLR)
+    if getattr(args, "model", None) == "simple_cnn":
+        GPA.pai_tracker.set_optimizer(optim.Adadelta)
+        GPA.pai_tracker.set_scheduler(StepLR)
+    else:
+        GPA.pai_tracker.set_optimizer(optim.AdamW)
+        GPA.pai_tracker.set_scheduler(CosineAnnealingLR)
     # GPA.pai_tracker.set_scheduler(torch.optim.lr_scheduler.ReduceLROnPlateau)
 
     for name in ["pre_fc", "classifier_fc"]:
@@ -130,9 +134,15 @@ def setup_pai_optimizer_scheduler(args, model: torch.nn.Module):
         t_max = args.epochs
     else:
         raise RuntimeError("Epochs is set to 0. Cannot train. This is used to mainly set T_max for CosineAnnealingLR Scheduler")
-    sched_args = {
-        "T_max": t_max
-    }
+    if getattr(args, "model", None) == "simple_cnn":
+        sched_args = {
+            "step_size": 1,
+            "gamma": args.gamma,
+        }
+    else:
+        sched_args = {
+            "T_max": t_max
+        }
     # sched_args = {'mode':'max', 'patience': 1} # Make sure this is lower than epochs to switch
 
     optim_args_for_print = {k: v for k, v in optim_args.items() if k != "params"}
